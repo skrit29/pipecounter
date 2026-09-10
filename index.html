@@ -14,8 +14,6 @@
   <link rel="apple-touch-icon" href="assets/icons/icon-192.png"/>
 
   <link rel="stylesheet" href="style.css"/>
-
-  <!-- onnxruntime-web (WebAssembly backend) -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/ort.min.js"></script>
 </head>
 <body>
@@ -25,59 +23,72 @@
 </header>
 
 <main>
-  <!-- Status line -->
   <p class="status" id="status">Loading AI model…</p>
 
-  <!-- Image preview + detection overlay -->
-  <div class="image-wrap" id="image-wrap">
-    <p class="placeholder-text" id="placeholder">Pick a photo to get started</p>
-    <img id="preview" alt="Selected image" hidden/>
-    <canvas id="overlay" hidden></canvas>
+  <!-- Image preview (shared across crop / scan / edit states) -->
+  <div class="image-wrap" id="image-wrap" hidden>
+    <img id="preview" alt="" hidden/>
+    <canvas id="crop-overlay" hidden></canvas><!-- crop tool overlay -->
+    <canvas id="overlay"      hidden></canvas><!-- detection circles -->
   </div>
 
-  <!-- Controls -->
-  <div class="controls">
-    <!-- Resolution mode -->
+  <!-- ── IDLE: pick image + choose mode ─────────────────────────── -->
+  <section id="sec-idle">
     <div class="mode-row">
       <label class="mode-btn selected" id="lbl-std">
-        <input type="radio" name="mode" id="mode-std" value="standard" checked/>
+        <input type="radio" name="res" id="mode-std" checked/>
         ⚡ Standard
-        <div style="font-size:0.75rem;color:var(--muted);margin-top:3px">Faster · large pipes</div>
+        <div class="mode-sub">Faster · good for large pipes</div>
       </label>
       <label class="mode-btn" id="lbl-high">
-        <input type="radio" name="mode" id="mode-high" value="high"/>
+        <input type="radio" name="res" id="mode-high"/>
         🔍 High-Res
-        <div style="font-size:0.75rem;color:var(--muted);margin-top:3px">Slower · small pipes</div>
+        <div class="mode-sub">Slower · catches small pipes</div>
       </label>
     </div>
+    <button class="btn-accent full-width" id="pick-btn">📷 Pick Image</button>
+    <input type="file" id="file-input" accept="image/*" hidden/>
+  </section>
 
-    <!-- Action buttons -->
+  <!-- ── CROP: adjust region before scanning ────────────────────── -->
+  <section id="sec-crop" hidden>
+    <p class="hint">Drag the corners to select the area you want to scan.<br/>
+       You can also draw a new region by dragging on the image.</p>
     <div class="action-row">
-      <button class="btn-pick" id="pick-btn">📷 Pick Image</button>
-      <button class="btn-scan" id="scan-btn" disabled>Count Pipes</button>
+      <button class="btn-secondary" id="skip-crop-btn">Scan Full Image</button>
+      <button class="btn-accent"    id="apply-crop-btn">✂ Crop &amp; Scan</button>
     </div>
-  </div>
+  </section>
 
-  <!-- Hidden file input — shows camera or gallery on mobile -->
-  <input type="file" id="file-input" accept="image/*" style="display:none"/>
-
-  <!-- Progress -->
-  <div class="progress-wrap" id="progress-wrap" hidden>
+  <!-- ── SCAN: progress ─────────────────────────────────────────── -->
+  <section id="sec-scan" hidden>
     <div class="progress-track">
-      <div class="progress-fill" id="progress-bar" role="progressbar"
-           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+      <div class="progress-fill" id="progress-bar"></div>
     </div>
     <p class="progress-label" id="progress-lbl">Starting…</p>
-  </div>
+    <button class="btn-secondary" id="cancel-btn">Cancel</button>
+  </section>
 
-  <!-- Results -->
-  <section class="result-section" id="result-section" hidden>
+  <!-- ── EDIT: results + interactive editing ────────────────────── -->
+  <section id="sec-edit" hidden>
     <div class="count-row">
       <div class="count-number" id="count-lbl">0</div>
       <div class="count-label">pipe ends detected</div>
     </div>
+
     <div class="breakdown" id="breakdown"></div>
-    <button class="btn-reset" id="reset-btn">Reset</button>
+
+    <div class="edit-toolbar">
+      <span class="edit-label">Tap circle to:</span>
+      <button class="edit-btn active" id="btn-remove">✕ Remove</button>
+      <button class="edit-btn"        id="btn-add">＋ Add</button>
+    </div>
+    <p class="hint" id="edit-hint">Tap a circle on the image to remove it.</p>
+
+    <div class="action-row">
+      <button class="btn-secondary" id="share-btn">⬆ Share</button>
+      <button class="btn-secondary" id="new-scan-btn">↩ New Scan</button>
+    </div>
   </section>
 </main>
 
@@ -85,20 +96,12 @@
 
 <script>
   // Mode button highlight
-  document.querySelectorAll('input[name="mode"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-      document.getElementById('lbl-std').classList.toggle('selected', document.getElementById('mode-std').checked);
+  ['mode-std','mode-high'].forEach(id => {
+    document.getElementById(id).addEventListener('change', () => {
+      document.getElementById('lbl-std').classList.toggle('selected',  document.getElementById('mode-std').checked);
       document.getElementById('lbl-high').classList.toggle('selected', document.getElementById('mode-high').checked);
     });
   });
-
-  // Show/hide placeholder text
-  const preview = document.getElementById('preview');
-  const placeholder = document.getElementById('placeholder');
-  const observer = new MutationObserver(() => {
-    placeholder.hidden = !preview.hidden;
-  });
-  observer.observe(preview, { attributes: true, attributeFilter: ['hidden'] });
 </script>
 </body>
 </html>
