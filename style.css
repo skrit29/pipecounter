@@ -221,7 +221,9 @@ input[type=range]::-moz-range-thumb {
   border-radius: var(--radius);
   padding: 12px 14px;
 }
-.stepper { display: flex; align-items: center; gap: 10px; }
+.preview-note { text-align: left; font-size: 0.76rem; margin-top: -2px; }
+.match-btn { flex-shrink: 0; padding: 12px 10px; font-size: 0.82rem; }
+.stepper { display: flex; align-items: center; gap: 8px; }
 .step-btn {
   width: 46px; height: 46px;
   flex-shrink: 0;

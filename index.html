@@ -110,13 +110,19 @@
       <button class="edit-btn size-btn" data-size="large">Large</button>
     </div>
 
-    <!-- ADD options: explicit diameter in image pixels -->
+    <!-- ADD options: size picker with a live on-image preview -->
     <div class="add-opts" id="add-opts" hidden>
-      <label class="edit-label" for="add-size">Diameter of pipe to add (px):</label>
+      <div class="slider-head">
+        <span class="slider-title">Size of pipe to add</span>
+        <span class="slider-readout"><span id="add-size-px">40</span> px</span>
+      </div>
+      <p class="hint preview-note">A dashed preview circle shows this size on the image.</p>
+      <input type="range" id="add-size-range" min="2" max="200" step="1" value="40"/>
       <div class="stepper">
         <button class="step-btn" id="size-minus">−</button>
         <input type="number" id="add-size" min="2" step="1" value="40"/>
         <button class="step-btn" id="size-plus">+</button>
+        <button class="btn-secondary match-btn" id="size-match">⌖ Average</button>
       </div>
       <p class="hint" id="add-size-hint">Detected average: —</p>
     </div>

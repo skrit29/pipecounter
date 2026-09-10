@@ -31,6 +31,8 @@ const sensReadout   = document.getElementById('sens-readout');
 const removeOpts    = document.getElementById('remove-opts');
 const addOpts       = document.getElementById('add-opts');
 const addSizeInput  = document.getElementById('add-size');
+const addSizeRange  = document.getElementById('add-size-range');
+const addSizePx     = document.getElementById('add-size-px');
 const addSizeHint   = document.getElementById('add-size-hint');
 
 // ── App state ─────────────────────────────────────────────────────────
@@ -124,6 +126,9 @@ function clearResults() {
 // ══════════════════════════════════════════════════════════════════════
 
 function initCrop() {
+  // waitForLayout can fire after the user has already moved on (e.g. tapped
+  // "Full Image" immediately). Never resurrect the crop box outside crop state.
+  if (document.getElementById('sec-crop').hidden) return;
   crop = { x1: 0.05, y1: 0.05, x2: 0.95, y2: 0.95 };
   sizeCanvasToPreview(cropOverlayEl);
   cropOverlayEl.hidden = false;
@@ -294,6 +299,9 @@ function applyZoom() {
   zoom.tx = Math.min(0, Math.max(-W * (s - 1), zoom.tx));
   zoom.ty = Math.min(0, Math.max(-H * (s - 1), zoom.ty));
   zoomLayer.style.transform = `translate(${zoom.tx}px, ${zoom.ty}px) scale(${s})`;
+  // The ghost sits at the centre of the visible area and strokes scale with
+  // zoom, so it has to be redrawn as the view moves.
+  if (editMode === 'add' && !document.getElementById('sec-edit').hidden) renderOverlay();
 }
 
 function resetZoom() {
@@ -384,6 +392,7 @@ overlayCanvas.addEventListener('click', e => {
 async function startScan(img) {
   scanImg     = img;
   cancelToken = { cancelled: false };
+  cropOverlayEl.hidden = true;   // the crop box never belongs over results
   setState('scan');
   setProgress(0, 'Starting…');
 
@@ -438,6 +447,10 @@ function refresh() {
 // ══════════════════════════════════════════════════════════════════════
 
 function renderOverlay() {
+  // If the element currently has no layout (backgrounded tab, pane hidden),
+  // resizing the canvas to 1px would throw the drawing away. Skip and let
+  // the resize/visibility handler redraw once real dimensions come back.
+  if (preview.offsetWidth < 2) return;
   if (overlayCanvas.width !== preview.offsetWidth) sizeCanvasToPreview(overlayCanvas);
   const ctx = overlayCanvas.getContext('2d');
   ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
@@ -465,7 +478,48 @@ function renderOverlay() {
     ctx.fillText(String(i + 1), px, py);
   });
 
+  if (editMode === 'add') drawAddPreview(ctx, zs);
+
   countLbl.textContent = activePipes.length;
+}
+
+// Dashed ghost circle showing exactly how big an added pipe will be,
+// drawn at the centre of whatever part of the image is currently on screen
+// so it sits right next to real pipes for comparison.
+function drawAddPreview(ctx, zs) {
+  const W = overlayCanvas.width, H = overlayCanvas.height;
+  const s = zoom.scale;
+  // Map the centre of the visible viewport back into canvas coordinates.
+  const cx = ((imageWrap.clientWidth  / 2) - zoom.tx) / s;
+  const cy = ((imageWrap.clientHeight / 2) - zoom.ty) / s;
+  const pr = addRadiusPct() / 100 * W;
+  if (!(pr > 0) || cx < 0 || cx > W || cy < 0 || cy > H) return;
+
+  ctx.save();
+  ctx.setLineDash([6 / zs, 5 / zs]);
+  ctx.beginPath();
+  ctx.arc(cx, cy, pr, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(57,255,20,0.14)';
+  ctx.fill();
+  ctx.strokeStyle = '#39FF14';
+  ctx.lineWidth = Math.max(1.5, pr * 0.06) / zs;
+  ctx.stroke();
+  // Crosshair so the exact centre is unambiguous
+  ctx.setLineDash([]);
+  const t = Math.max(4, pr * 0.3);
+  ctx.beginPath();
+  ctx.moveTo(cx - t, cy); ctx.lineTo(cx + t, cy);
+  ctx.moveTo(cx, cy - t); ctx.lineTo(cx, cy + t);
+  ctx.lineWidth = 1.5 / zs;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Radius (as % of image width) for the size currently chosen in Add mode.
+function addRadiusPct() {
+  const w  = scanImg?.naturalWidth || scanImg?.width || 1000;
+  const px = Math.max(2, +addSizeInput.value || 2);
+  return (px / 2) / w * 100;
 }
 
 function renderBreakdown() {
@@ -493,6 +547,7 @@ function setEditMode(m) {
   removeOpts.hidden = (m !== 'remove');
   addOpts.hidden    = (m !== 'add');
   updateHint();
+  if (!document.getElementById('sec-edit').hidden) renderOverlay();  // show/hide ghost
 }
 
 document.querySelectorAll('.size-btn').forEach(btn => {
@@ -510,27 +565,37 @@ function updateHint() {
     : `Tap the image to add a ${addSizeInput.value}px pipe. Pinch to zoom · drag to pan.`;
 }
 
-// ── Add-size stepper ──────────────────────────────────────────────────
+// ── Add-size picker (slider + number + live preview) ──────────────────
+let detectedMedianPx = 40;
+
 function initAddSizeDefault() {
   const w = scanImg?.naturalWidth || scanImg?.width || 1000;
   if (rawPipes.length) {
     const diams = rawPipes.map(p => (p.radius / 100) * w * 2).sort((a, b) => a - b);
-    const med   = Math.round(diams[Math.floor(diams.length / 2)]);
-    addSizeInput.value = Math.max(2, med);
-    addSizeHint.textContent = `Detected average: ${med} px · image is ${w} px wide`;
+    detectedMedianPx = Math.max(2, Math.round(diams[Math.floor(diams.length / 2)]));
+    addSizeHint.textContent = `Detected average: ${detectedMedianPx} px · image is ${w} px wide`;
   } else {
     addSizeHint.textContent = `Image is ${w} px wide`;
   }
-  updateHint();
+  // Range covers a useful span around the real pipe size in this image.
+  addSizeRange.max = Math.max(40, Math.round(detectedMedianPx * 4));
+  setAddSize(detectedMedianPx);
 }
 
-document.getElementById('size-minus').addEventListener('click', () => {
-  addSizeInput.value = Math.max(2, (+addSizeInput.value || 2) - 2); updateHint();
-});
-document.getElementById('size-plus').addEventListener('click', () => {
-  addSizeInput.value = (+addSizeInput.value || 0) + 2; updateHint();
-});
-addSizeInput.addEventListener('input', updateHint);
+function setAddSize(px) {
+  const v = Math.max(2, Math.round(px));
+  addSizeInput.value = v;
+  addSizeRange.value = Math.min(v, +addSizeRange.max);
+  addSizePx.textContent = v;
+  updateHint();
+  if (!document.getElementById('sec-edit').hidden) renderOverlay();  // refresh ghost
+}
+
+addSizeRange.addEventListener('input', () => setAddSize(+addSizeRange.value));
+addSizeInput.addEventListener('input', () => setAddSize(+addSizeInput.value || 2));
+document.getElementById('size-minus').addEventListener('click', () => setAddSize((+addSizeInput.value || 2) - 2));
+document.getElementById('size-plus') .addEventListener('click', () => setAddSize((+addSizeInput.value || 0) + 2));
+document.getElementById('size-match').addEventListener('click', () => setAddSize(detectedMedianPx));
 
 // ── Tap → add or remove ───────────────────────────────────────────────
 function handleTap(clientX, clientY) {
@@ -556,12 +621,9 @@ function handleTap(clientX, clientY) {
       refresh();
     }
   } else {
-    const w  = scanImg?.naturalWidth || scanImg?.width || 1000;
-    const px = Math.max(2, +addSizeInput.value || 2);
-    // Radius as a percentage of image width, from the diameter in image pixels.
     manualPipes.push({
       x: tapX, y: tapY,
-      radius: (px / 2) / w * 100,
+      radius: addRadiusPct(),
       confidence: 100,
       mid: nextManualId++,
     });
@@ -645,11 +707,15 @@ document.getElementById('new-scan-btn').addEventListener('click', () => {
   setState('idle');
 });
 
-// Keep canvases correct when the viewport changes (rotation etc.)
-window.addEventListener('resize', () => {
+// Keep canvases correct when the viewport changes (rotation, tab restored…)
+function relayoutCanvases() {
+  if (preview.offsetWidth < 2) return;
   if (!document.getElementById('sec-edit').hidden) { sizeCanvasToPreview(overlayCanvas); renderOverlay(); }
   else if (!document.getElementById('sec-crop').hidden) { sizeCanvasToPreview(cropOverlayEl); drawCrop(); }
-});
+}
+window.addEventListener('resize', relayoutCanvases);
+window.addEventListener('orientationchange', () => setTimeout(relayoutCanvases, 200));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(relayoutCanvases, 60); });
 
 // ── Helpers ────────────────────────────────────────────────────────────
 function setStatus(msg, isError = false) {

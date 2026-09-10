@@ -155,7 +155,10 @@ export async function detectPipes(img, mode, onProgress, cancelToken) {
     return {
       x:          ((box.x1 + box.x2) / 2 / ww) * 100,
       y:          ((box.y1 + box.y2) / 2 / wh) * 100,
-      radius:     (Math.sqrt(bw * bh) / 2 / ww) * 100,
+      // Inscribed circle of the box. sqrt(bw*bh) (the geometric mean) runs
+      // larger than the pipe whenever the box isn't square, which drew the
+      // ring around the pipe instead of on it.
+      radius:     (Math.min(bw, bh) / 2 / ww) * 100,
       confidence: box.conf * 100,
     };
   });
@@ -328,11 +331,16 @@ function nms(boxes, threshold) {
 }
 
 function mergeDetections(boxes) {
-  // Remove duplicates across tiles (smaller box heavily overlapping larger)
+  // Remove duplicates across tiles.
+  //
+  // Ordered by CONFIDENCE, not area. Sorting by area meant the biggest box
+  // won every overlap, so a large sloppy low-scoring box would suppress the
+  // tight accurate one covering the same pipe — circles ended up drawn
+  // larger than the pipe they sit on. Keeping the most confident box first
+  // is both standard NMS behaviour and visibly tighter.
   const filtered = [];
-  for (const b of boxes.sort((a, b2) => area(b2) - area(a))) {
+  for (const b of boxes.sort((a, b2) => b2.conf - a.conf)) {
     const dup = filtered.some(k =>
-      k.conf >= b.conf * 0.85 &&
       intersectionOverSmaller(b, k) > SMALLER_BOX_OVERLAP &&
       !plausibleNested(b, k)
     );
