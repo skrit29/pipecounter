@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>PipeCounter</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json"/>
+  <meta name="theme-color" content="#1a1d27"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="PipeCounter"/>
+  <link rel="apple-touch-icon" href="assets/icons/icon-192.png"/>
+
+  <link rel="stylesheet" href="style.css"/>
+
+  <!-- onnxruntime-web (WebAssembly backend) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/ort.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>Pipe<span>Counter</span></h1>
+</header>
+
+<main>
+  <!-- Status line -->
+  <p class="status" id="status">Loading AI model…</p>
+
+  <!-- Image preview + detection overlay -->
+  <div class="image-wrap" id="image-wrap">
+    <p class="placeholder-text" id="placeholder">Pick a photo to get started</p>
+    <img id="preview" alt="Selected image" hidden/>
+    <canvas id="overlay" hidden></canvas>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <!-- Resolution mode -->
+    <div class="mode-row">
+      <label class="mode-btn selected" id="lbl-std">
+        <input type="radio" name="mode" id="mode-std" value="standard" checked/>
+        ⚡ Standard
+        <div style="font-size:0.75rem;color:var(--muted);margin-top:3px">Faster · large pipes</div>
+      </label>
+      <label class="mode-btn" id="lbl-high">
+        <input type="radio" name="mode" id="mode-high" value="high"/>
+        🔍 High-Res
+        <div style="font-size:0.75rem;color:var(--muted);margin-top:3px">Slower · small pipes</div>
+      </label>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="action-row">
+      <button class="btn-pick" id="pick-btn">📷 Pick Image</button>
+      <button class="btn-scan" id="scan-btn" disabled>Count Pipes</button>
+    </div>
+  </div>
+
+  <!-- Hidden file input — shows camera or gallery on mobile -->
+  <input type="file" id="file-input" accept="image/*" style="display:none"/>
+
+  <!-- Progress -->
+  <div class="progress-wrap" id="progress-wrap" hidden>
+    <div class="progress-track">
+      <div class="progress-fill" id="progress-bar" role="progressbar"
+           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+    </div>
+    <p class="progress-label" id="progress-lbl">Starting…</p>
+  </div>
+
+  <!-- Results -->
+  <section class="result-section" id="result-section" hidden>
+    <div class="count-row">
+      <div class="count-number" id="count-lbl">0</div>
+      <div class="count-label">pipe ends detected</div>
+    </div>
+    <div class="breakdown" id="breakdown"></div>
+    <button class="btn-reset" id="reset-btn">Reset</button>
+  </section>
+</main>
+
+<script type="module" src="app.js"></script>
+
+<script>
+  // Mode button highlight
+  document.querySelectorAll('input[name="mode"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      document.getElementById('lbl-std').classList.toggle('selected', document.getElementById('mode-std').checked);
+      document.getElementById('lbl-high').classList.toggle('selected', document.getElementById('mode-high').checked);
+    });
+  });
+
+  // Show/hide placeholder text
+  const preview = document.getElementById('preview');
+  const placeholder = document.getElementById('placeholder');
+  const observer = new MutationObserver(() => {
+    placeholder.hidden = !preview.hidden;
+  });
+  observer.observe(preview, { attributes: true, attributeFilter: ['hidden'] });
+</script>
+</body>
+</html>
