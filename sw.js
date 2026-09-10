@@ -14,7 +14,8 @@
 //     cache used only when offline). Always current when online.
 //   • versioned CDN + wasm files → cache-first (immutable URLs, safe forever).
 
-const CACHE_NAME = 'pipecounter-v13';
+// Keep in step with APP_VERSION in app.js, which shows this number in the UI.
+const CACHE_NAME = 'pipecounter-v14';
 
 const APP_SHELL = [
   './',

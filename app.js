@@ -78,6 +78,40 @@ let pinch = { active: false, startDist: 0, startScale: 1, ox: 0, oy: 0, startTx:
 let pan   = { active: false, startX: 0, startY: 0, startTx: 0, startTy: 0 };
 let tapStart = null;
 
+// ── Version badge ─────────────────────────────────────────────────────
+// Shown in the header so it is always possible to tell, from the phone
+// itself, whether a fix has actually arrived. A stale service worker once
+// served old code for several releases with no visible symptom, which made
+// "is this the fixed version?" unanswerable without developer tools.
+// Keep in step with CACHE_NAME in sw.js.
+const APP_VERSION = 14;
+
+const versionEl = document.getElementById('app-version');
+if (versionEl) {
+  versionEl.textContent = 'v' + APP_VERSION;
+  // Tapping it forces an update check and reloads if a newer build exists.
+  versionEl.addEventListener('click', async () => {
+    versionEl.textContent = 'checking…';
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      await reg?.update();
+      const txt = await (await fetch('./app.js?cb=' + Date.now(), { cache: 'no-store' })).text();
+      const m = txt.match(/APP_VERSION\s*=\s*(\d+)/);
+      const latest = m ? +m[1] : APP_VERSION;
+      if (latest > APP_VERSION) {
+        versionEl.textContent = 'updating…';
+        for (const k of await caches.keys()) await caches.delete(k);
+        location.reload();
+      } else {
+        versionEl.textContent = 'v' + APP_VERSION + ' ✓';
+        setTimeout(() => { versionEl.textContent = 'v' + APP_VERSION; }, 2500);
+      }
+    } catch (_) {
+      versionEl.textContent = 'v' + APP_VERSION;
+    }
+  });
+}
+
 // ── Service Worker ────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
