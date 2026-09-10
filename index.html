@@ -37,18 +37,6 @@
 
   <!-- ── IDLE ───────────────────────────────────────────────────── -->
   <section id="sec-idle">
-    <div class="mode-row">
-      <label class="mode-btn selected" id="lbl-std">
-        <input type="radio" name="res" id="mode-std" checked/>
-        ⚡ Standard
-        <div class="mode-sub">Use this for most photos</div>
-      </label>
-      <label class="mode-btn" id="lbl-high">
-        <input type="radio" name="res" id="mode-high"/>
-        🔍 High-Res
-        <div class="mode-sub">Only when pipes look small &amp; far away</div>
-      </label>
-    </div>
     <label class="toggle-row">
       <input type="checkbox" id="enhance-chk" checked/>
       <span>
@@ -147,13 +135,5 @@
 
 <script type="module" src="app.js"></script>
 
-<script>
-  ['mode-std','mode-high'].forEach(id => {
-    document.getElementById(id).addEventListener('change', () => {
-      document.getElementById('lbl-std').classList.toggle('selected',  document.getElementById('mode-std').checked);
-      document.getElementById('lbl-high').classList.toggle('selected', document.getElementById('mode-high').checked);
-    });
-  });
-</script>
 </body>
 </html>

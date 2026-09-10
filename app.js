@@ -45,7 +45,6 @@ const progressLbl   = document.getElementById('progress-lbl');
 const countLbl      = document.getElementById('count-lbl');
 const breakdownEl   = document.getElementById('breakdown');
 const editHint      = document.getElementById('edit-hint');
-const modeHigh      = document.getElementById('mode-high');
 const sensSlider    = document.getElementById('sens-slider');
 const sensReadout   = document.getElementById('sens-readout');
 const removeOpts    = document.getElementById('remove-opts');
@@ -84,7 +83,7 @@ let tapStart = null;
 // served old code for several releases with no visible symptom, which made
 // "is this the fixed version?" unanswerable without developer tools.
 // Keep in step with CACHE_NAME in sw.js.
-const APP_VERSION = 15;
+const APP_VERSION = 16;
 
 const versionEl = document.getElementById('app-version');
 if (versionEl) {
@@ -539,8 +538,15 @@ async function startScan(img) {
   try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
 
   try {
-    const mode = modeHigh.checked ? 'high' : 'standard';
-    const found = await detectPipes(img, mode,
+    // Single detection mode. High-Res used to pre-scale the photo larger, but
+    // adaptive tiling cancels that out entirely — tile size is derived from
+    // the measured pipe size, so pipes land at the same size in the model
+    // input either way. Measured across 13 photos, High-Res with the same
+    // tile overlap gave byte-identical counts; all its remaining effect came
+    // from a tighter overlap, which cost ~50% more time and made two images
+    // materially worse by fragmenting large pipes. It was a slower path to a
+    // worse answer, so the choice is gone.
+    const found = await detectPipes(img, 'standard',
       pct => setProgress(pct, `Scanning… ${pct}%`), cancelToken,
       { enhance: document.getElementById('enhance-chk').checked });
 
