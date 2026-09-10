@@ -27,6 +27,24 @@ const HIGH_RES_STRIDE_MULT   = 0.60;
 const STANDARD_STRIDE_MULT   = 0.75;
 const MAX_REGION_CANDIDATES  = 2000;
 
+// How large a pipe should appear inside the 640px model input.
+//
+// This is the single biggest driver of accuracy. Measured on one image by
+// feeding the model the same pipes at three scales:
+//     pipe ~36px in input -> 45 found, best confidence 0.39
+//     pipe ~72px in input -> 67 found, best confidence 0.63
+//     pipe ~144px in input -> 28 found, best confidence 0.80
+// A fixed 1280px tile squeezed into 640 halves everything, so on a photo whose
+// pipes are already small the model was being handed ~36px blobs and returned
+// low-confidence guesses that looked random. Tile size is now derived from the
+// measured pipe size so pipes always land near this target.
+const TARGET_OBJ_PX          = 110;
+const PROBE_CONF             = 0.12;
+const MIN_TILE               = 320;
+const MAX_TILE               = 1600;
+const MAX_TILES_STANDARD     = 48;
+const MAX_TILES_HIGH         = 96;
+
 const DB_NAME    = 'PipeCounterDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'models';
@@ -173,7 +191,8 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
   const highRes      = mode === 'high';
   const maxSide      = highRes ? MAX_HIGH_SIDE : MAX_STANDARD_SIDE;
   const strideMult   = highRes ? HIGH_RES_STRIDE_MULT : STANDARD_STRIDE_MULT;
-  const tileSize     = STANDARD_TILE_SIZE; // always 1280 — both modes
+  const maxTiles     = highRes ? MAX_TILES_HIGH : MAX_TILES_STANDARD;
+  const enhance      = !!opts.enhance;
 
   // ── Pre-scale ──────────────────────────────────────────────────────────────
   // Contrast normalisation happens per tile inside runTile, not here — see
@@ -181,15 +200,48 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
   // region of an otherwise well-exposed photo.
   const { canvas, ww, wh } = prescale(img, maxSide);
 
-  // ── Tile ───────────────────────────────────────────────────────────────────
+  // ── Pass 1: probe for pipe size ────────────────────────────────────────────
+  // A fixed tile size is the wrong thing to commit to before knowing how big
+  // the pipes are. A couple of coarse tiles are enough to measure that: even
+  // at low confidence the predicted box dimensions are accurate, it is only
+  // the score that suffers when objects are small.
+  const probeTile    = Math.min(STANDARD_TILE_SIZE, Math.max(ww, wh));
+  const probeRegions = buildTileRegions(ww, wh, probeTile, 0.95);
+  const probeBoxes   = [];
+  for (let i = 0; i < probeRegions.length; i++) {
+    if (cancelToken?.cancelled) throw new Error('cancelled');
+    probeBoxes.push(...await runTile(_session, canvas, probeRegions[i], enhance));
+    onProgress?.(Math.round(((i + 1) / probeRegions.length) * 12));
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  let tileSize = STANDARD_TILE_SIZE;
+  const diam = probeBoxes
+    .filter(b => b.conf >= PROBE_CONF)
+    .map(b => Math.min(b.x2 - b.x1, b.y2 - b.y1))
+    .sort((a, b) => a - b);
+  if (diam.length >= 5) {
+    const median = diam[Math.floor(diam.length / 2)];
+    // Tile T is squeezed into INPUT_SIZE, so an object of size D appears at
+    // D * INPUT_SIZE / T. Solve for the tile that puts it on TARGET_OBJ_PX.
+    tileSize = clamp(Math.round(median * INPUT_SIZE / TARGET_OBJ_PX), MIN_TILE, MAX_TILE);
+    // Small tiles on a big photo explode the tile count; back off until the
+    // scan is a sane length, trading some accuracy for finishing at all.
+    while (tileSize < MAX_TILE &&
+           buildTileRegions(ww, wh, tileSize, strideMult).length > maxTiles) {
+      tileSize = Math.round(tileSize * 1.25);
+    }
+  }
+
+  // ── Pass 2: detect at the chosen scale ─────────────────────────────────────
   const regions  = buildTileRegions(ww, wh, tileSize, strideMult);
   const allBoxes = [];
 
   for (let i = 0; i < regions.length; i++) {
     if (cancelToken?.cancelled) throw new Error('cancelled');
-    const boxes = await runTile(_session, canvas, regions[i], !!opts.enhance);
+    const boxes = await runTile(_session, canvas, regions[i], enhance);
     allBoxes.push(...boxes);
-    onProgress?.(Math.round(((i + 1) / regions.length) * 90));
+    onProgress?.(12 + Math.round(((i + 1) / regions.length) * 80));
     // Yield to the UI thread so progress paints and the app stays responsive
     await new Promise(r => setTimeout(r, 0));
   }
