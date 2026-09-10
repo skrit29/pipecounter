@@ -2,7 +2,7 @@
 // The 79 MB model is stored separately in IndexedDB by app.js so that
 // progress can be shown during the first download.
 
-const CACHE_NAME = 'pipecounter-v4';
+const CACHE_NAME = 'pipecounter-v5';
 const STATIC_ASSETS = [
   './',
   './index.html',

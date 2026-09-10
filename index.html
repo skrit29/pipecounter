@@ -25,14 +25,17 @@
 <main>
   <p class="status" id="status">Loading AI model…</p>
 
-  <!-- Image preview (shared across crop / scan / edit states) -->
+  <!-- Image viewport. Fixed box; zoom happens on the inner layer and is
+       clipped here so it can never spill over the buttons below. -->
   <div class="image-wrap" id="image-wrap" hidden>
-    <img id="preview" alt="" hidden/>
-    <canvas id="crop-overlay" hidden></canvas><!-- crop tool overlay -->
-    <canvas id="overlay"      hidden></canvas><!-- detection circles -->
+    <div class="zoom-layer" id="zoom-layer">
+      <img id="preview" alt=""/>
+      <canvas id="crop-overlay" hidden></canvas><!-- crop tool -->
+      <canvas id="overlay"      hidden></canvas><!-- detection circles -->
+    </div>
   </div>
 
-  <!-- ── IDLE: pick image + choose mode ─────────────────────────── -->
+  <!-- ── IDLE ───────────────────────────────────────────────────── -->
   <section id="sec-idle">
     <div class="mode-row">
       <label class="mode-btn selected" id="lbl-std">
@@ -46,31 +49,22 @@
         <div class="mode-sub">Slower · catches small pipes</div>
       </label>
     </div>
-    <!-- Confidence / sensitivity slider -->
-    <div class="slider-row">
-      <label class="slider-label" for="conf-slider">
-        Detection sensitivity:
-        <span id="conf-val">Medium</span>
-      </label>
-      <input type="range" id="conf-slider" min="5" max="50" step="1" value="20"/>
-      <div class="slider-ticks"><span>Low</span><span>High</span></div>
-    </div>
-
     <button class="btn-accent full-width" id="pick-btn">📷 Pick Image</button>
     <input type="file" id="file-input" accept="image/*" hidden/>
   </section>
 
-  <!-- ── CROP: adjust region before scanning ────────────────────── -->
+  <!-- ── CROP ───────────────────────────────────────────────────── -->
   <section id="sec-crop" hidden>
-    <p class="hint">Drag the corners to select the area you want to scan.<br/>
-       You can also draw a new region by dragging on the image.</p>
+    <p class="hint">Drag the green corner handles to select the area to scan,
+       or drag on an empty part of the image to draw a new box.</p>
     <div class="action-row">
-      <button class="btn-secondary" id="skip-crop-btn">Scan Full Image</button>
+      <button class="btn-secondary" id="reset-crop-btn">↺ Reset</button>
+      <button class="btn-secondary" id="skip-crop-btn">Full Image</button>
       <button class="btn-accent"    id="apply-crop-btn">✂ Crop &amp; Scan</button>
     </div>
   </section>
 
-  <!-- ── SCAN: progress ─────────────────────────────────────────── -->
+  <!-- ── SCAN ───────────────────────────────────────────────────── -->
   <section id="sec-scan" hidden>
     <div class="progress-track">
       <div class="progress-fill" id="progress-bar"></div>
@@ -79,11 +73,24 @@
     <button class="btn-secondary" id="cancel-btn">Cancel</button>
   </section>
 
-  <!-- ── EDIT: results + interactive editing ────────────────────── -->
+  <!-- ── EDIT / RESULTS ─────────────────────────────────────────── -->
   <section id="sec-edit" hidden>
     <div class="count-row">
       <div class="count-number" id="count-lbl">0</div>
       <div class="count-label">pipe ends detected</div>
+    </div>
+
+    <!-- Sensitivity: filters the already-detected results, live -->
+    <div class="slider-row">
+      <div class="slider-head">
+        <span class="slider-title">Sensitivity</span>
+        <span class="slider-readout" id="sens-readout">— pipes</span>
+      </div>
+      <input type="range" id="sens-slider" min="0" max="100" step="1" value="70"/>
+      <div class="slider-ticks">
+        <span>Low<br><small>fewer, surer</small></span>
+        <span>High<br><small>more, noisier</small></span>
+      </div>
     </div>
 
     <div class="breakdown" id="breakdown"></div>
@@ -94,18 +101,30 @@
       <button class="edit-btn"        id="btn-add">＋ Add</button>
     </div>
 
-    <!-- Size filter — shown for both add and remove -->
-    <div class="edit-toolbar" id="size-toolbar">
-      <span class="edit-label">Size:</span>
-      <button class="edit-btn size-btn" id="sz-small"  data-size="small">● Small</button>
-      <button class="edit-btn size-btn active" id="sz-any" data-size="any">◎ Any</button>
-      <button class="edit-btn size-btn" id="sz-large"  data-size="large">◉ Large</button>
+    <!-- REMOVE options: which size may be removed -->
+    <div class="edit-toolbar" id="remove-opts">
+      <span class="edit-label">Remove:</span>
+      <button class="edit-btn size-btn active" data-size="any">Any</button>
+      <button class="edit-btn size-btn" data-size="small">Small</button>
+      <button class="edit-btn size-btn" data-size="medium">Medium</button>
+      <button class="edit-btn size-btn" data-size="large">Large</button>
     </div>
 
-    <p class="hint" id="edit-hint">Tap a circle on the image to remove it.
-       Pinch to zoom · drag to pan when zoomed.</p>
+    <!-- ADD options: explicit diameter in image pixels -->
+    <div class="add-opts" id="add-opts" hidden>
+      <label class="edit-label" for="add-size">Diameter of pipe to add (px):</label>
+      <div class="stepper">
+        <button class="step-btn" id="size-minus">−</button>
+        <input type="number" id="add-size" min="2" step="1" value="40"/>
+        <button class="step-btn" id="size-plus">+</button>
+      </div>
+      <p class="hint" id="add-size-hint">Detected average: —</p>
+    </div>
+
+    <p class="hint" id="edit-hint">Tap a circle to remove it. Pinch to zoom · drag to pan.</p>
 
     <div class="action-row">
+      <button class="btn-secondary" id="reset-zoom-btn">⤢ Fit</button>
       <button class="btn-secondary" id="share-btn">⬆ Share</button>
       <button class="btn-secondary" id="new-scan-btn">↩ New Scan</button>
     </div>
@@ -115,7 +134,6 @@
 <script type="module" src="app.js"></script>
 
 <script>
-  // Mode button highlight
   ['mode-std','mode-high'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
       document.getElementById('lbl-std').classList.toggle('selected',  document.getElementById('mode-std').checked);

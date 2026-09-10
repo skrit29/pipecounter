@@ -7,10 +7,10 @@ const INPUT_SIZE             = 640;
 const STANDARD_TILE_SIZE     = 1280;
 const MAX_STANDARD_SIDE      = 1920;
 const MAX_HIGH_SIDE          = 2560;
-let   CONFIDENCE_THRESHOLD   = 0.20; // lower for INT8 model (scores shift down vs FP32)
-
-/** Update confidence threshold at runtime (0-1). Called from UI slider. */
-export function setThreshold(v) { CONFIDENCE_THRESHOLD = Math.min(0.95, Math.max(0.02, v)); }
+// Detection floor. We deliberately keep everything down to a very low score
+// and let the UI sensitivity slider filter the results afterwards, so the
+// user can tune the count without paying for a re-scan.
+const CONFIDENCE_THRESHOLD   = 0.08;
 const IOU_THRESHOLD          = 0.45;
 const SMALLER_BOX_OVERLAP    = 0.88;
 const NESTED_MAX_SIZE_RATIO  = 0.58;
@@ -128,8 +128,7 @@ export async function detectPipes(img, mode, onProgress, cancelToken) {
   const tileSize     = STANDARD_TILE_SIZE; // always 1280 — both modes
 
   // ── Pre-scale ──────────────────────────────────────────────────────────────
-  const { canvas, ctx, ww, wh } = prescale(img, maxSide);
-  const imageData = ctx.getImageData(0, 0, ww, wh);
+  const { canvas, ww, wh } = prescale(img, maxSide);
 
   // ── Tile ───────────────────────────────────────────────────────────────────
   const regions  = buildTileRegions(ww, wh, tileSize, strideMult);
@@ -137,9 +136,11 @@ export async function detectPipes(img, mode, onProgress, cancelToken) {
 
   for (let i = 0; i < regions.length; i++) {
     if (cancelToken?.cancelled) throw new Error('cancelled');
-    const boxes = await runTile(_session, imageData, ww, wh, regions[i]);
+    const boxes = await runTile(_session, canvas, regions[i]);
     allBoxes.push(...boxes);
     onProgress?.(Math.round(((i + 1) / regions.length) * 90));
+    // Yield to the UI thread so progress paints and the app stays responsive
+    await new Promise(r => setTimeout(r, 0));
   }
 
   if (cancelToken?.cancelled) throw new Error('cancelled');
@@ -172,6 +173,8 @@ function prescale(img, maxSide) {
   canvas.width  = ww;
   canvas.height = wh;
   const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(img, 0, 0, ww, wh);
   return { canvas, ctx, ww, wh };
 }
@@ -201,27 +204,44 @@ function tilePositions(imageSize, tileSize, strideMult) {
 
 // ── Tile inference ────────────────────────────────────────────────────────────
 
-async function runTile(session, imageData, imgW, imgH, region) {
-  const { x, y, w, h } = region;
-  const scale       = Math.min(INPUT_SIZE / w, INPUT_SIZE / h);
-  const rsW         = Math.max(1, Math.round(w * scale));
-  const rsH         = Math.max(1, Math.round(h * scale));
-  const padL        = Math.round((INPUT_SIZE - rsW) / 2 - 0.1);
-  const padT        = Math.round((INPUT_SIZE - rsH) / 2 - 0.1);
-  const planeSize   = INPUT_SIZE * INPUT_SIZE;
-  const input       = new Float32Array(3 * planeSize).fill(114 / 255);
-  const pixels      = imageData.data; // RGBA flat array
+// Reusable offscreen canvas for letterboxing each tile to 640x640.
+let _tileCanvas = null, _tileCtx = null;
+function getTileCtx() {
+  if (!_tileCanvas) {
+    _tileCanvas = document.createElement('canvas');
+    _tileCanvas.width  = INPUT_SIZE;
+    _tileCanvas.height = INPUT_SIZE;
+    _tileCtx = _tileCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  return _tileCtx;
+}
 
-  for (let ty = 0; ty < rsH; ty++) {
-    const srcY = Math.min(imgH - 1, y + Math.floor(ty / scale));
-    for (let tx = 0; tx < rsW; tx++) {
-      const srcX   = Math.min(imgW - 1, x + Math.floor(tx / scale));
-      const src    = (srcY * imgW + srcX) * 4;
-      const dst    = (ty + padT) * INPUT_SIZE + (tx + padL);
-      input[dst]                 = pixels[src]     / 255; // R
-      input[planeSize + dst]     = pixels[src + 1] / 255; // G
-      input[planeSize * 2 + dst] = pixels[src + 2] / 255; // B
-    }
+async function runTile(session, srcCanvas, region) {
+  const { x, y, w, h } = region;
+  const scale = Math.min(INPUT_SIZE / w, INPUT_SIZE / h);
+  const rsW   = Math.max(1, Math.round(w * scale));
+  const rsH   = Math.max(1, Math.round(h * scale));
+  const padL  = Math.floor((INPUT_SIZE - rsW) / 2);
+  const padT  = Math.floor((INPUT_SIZE - rsH) / 2);
+
+  // Letterbox the tile onto a 640x640 grey canvas. drawImage does proper
+  // smooth (bilinear-ish) resampling — the old hand-rolled nearest-neighbour
+  // loop aliased away small pipes, which is why they went undetected.
+  const ctx = getTileCtx();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = '#727272';                       // 114,114,114 letterbox grey
+  ctx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+  ctx.drawImage(srcCanvas, x, y, w, h, padL, padT, rsW, rsH);
+
+  const px        = ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+  const planeSize = INPUT_SIZE * INPUT_SIZE;
+  const input     = new Float32Array(3 * planeSize);
+  for (let i = 0; i < planeSize; i++) {
+    const s = i * 4;
+    input[i]                 = px[s]     / 255; // R
+    input[planeSize + i]     = px[s + 1] / 255; // G
+    input[planeSize * 2 + i] = px[s + 2] / 255; // B
   }
 
   const tensor = new ort.Tensor('float32', input, [1, 3, INPUT_SIZE, INPUT_SIZE]);

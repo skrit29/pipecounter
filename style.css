@@ -12,6 +12,11 @@
   --radius:  12px;
 }
 
+/* Nothing with [hidden] may ever be displayed. This MUST come first and
+   carry !important: the .image-wrap canvas rule below would otherwise win
+   on specificity and leave "hidden" canvases stacked on top, eating taps. */
+[hidden] { display: none !important; }
+
 html, body {
   background: var(--bg);
   color: var(--text);
@@ -46,7 +51,9 @@ main {
 .status { text-align: center; color: var(--muted); font-size: 0.88rem; min-height: 1.2em; }
 .status.error { color: var(--danger); }
 
-/* ── Image wrap ──────────────────────────────────────────────────── */
+/* ── Image viewport ──────────────────────────────────────────────── */
+/* Fixed box that clips the zoom layer, so a zoomed image can never
+   paint over the controls below it. */
 .image-wrap {
   position: relative;
   width: 100%;
@@ -55,14 +62,25 @@ main {
   border-radius: var(--radius);
   overflow: hidden;
   min-height: 60px;
+  touch-action: none;   /* we handle all gestures ourselves */
 }
-.image-wrap img { width: 100%; display: block; }
-/* Both canvases sit on top of the image, full-size */
-.image-wrap canvas {
+
+/* The layer that actually gets scaled/translated. */
+.zoom-layer {
+  position: relative;
+  width: 100%;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.zoom-layer img { width: 100%; display: block; }
+
+.zoom-layer canvas {
   position: absolute;
   top: 0; left: 0;
   width: 100%; height: 100%;
   display: block;
+  touch-action: none;
 }
 
 /* ── Buttons ─────────────────────────────────────────────────────── */
@@ -82,7 +100,7 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .full-width    { width: 100%; }
 
 .action-row { display: flex; gap: 10px; }
-.action-row button { flex: 1; }
+.action-row button { flex: 1; padding: 13px 8px; font-size: 0.9rem; }
 
 /* ── Mode buttons ────────────────────────────────────────────────── */
 .mode-row { display: flex; gap: 10px; }
@@ -126,25 +144,7 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .bd-label  { flex: 1; color: var(--muted); }
 .bd-count  { font-weight: 700; }
 
-/* ── Edit toolbar ────────────────────────────────────────────────── */
-.edit-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.edit-label   { font-size: 0.82rem; color: var(--muted); flex-shrink: 0; }
-.edit-btn {
-  flex: 1;
-  padding: 10px 8px;
-  border: 2px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--muted);
-  font-size: 0.85rem;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: center;
-  transition: border-color 0.15s, color 0.15s;
-}
-.edit-btn.active { border-color: var(--accent); color: var(--text); }
-
-/* ── Confidence slider ───────────────────────────────────────────── */
+/* ── Sensitivity slider ──────────────────────────────────────────── */
 .slider-row {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -152,15 +152,11 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   padding: 12px 14px 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
 }
-.slider-label {
-  font-size: 0.88rem;
-  color: var(--muted);
-  display: flex;
-  justify-content: space-between;
-}
-.slider-label span { color: var(--accent); font-weight: 700; }
+.slider-head { display: flex; justify-content: space-between; align-items: baseline; }
+.slider-title   { font-size: 0.9rem; font-weight: 600; }
+.slider-readout { font-size: 0.85rem; color: var(--accent); font-weight: 700; }
 
 input[type=range] {
   -webkit-appearance: none;
@@ -173,30 +169,86 @@ input[type=range] {
 }
 input[type=range]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 22px; height: 22px;
+  width: 26px; height: 26px;
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
 }
 input[type=range]::-moz-range-thumb {
-  width: 22px; height: 22px;
+  width: 26px; height: 26px;
   border-radius: 50%;
   background: var(--accent);
   border: none;
   cursor: pointer;
 }
 
+/* Low on the LEFT, High on the RIGHT — one label at each end of the bar. */
 .slider-ticks {
   display: flex;
   justify-content: space-between;
-  font-size: 0.72rem;
+  font-size: 0.76rem;
   color: var(--muted);
 }
+.slider-ticks span:first-child { text-align: left; }
+.slider-ticks span:last-child  { text-align: right; }
+.slider-ticks small { font-size: 0.68rem; opacity: 0.7; }
 
-/* ── Image wrap — overflow clip so zoom doesn't spill into page ──── */
-.image-wrap { overflow: hidden; }
-.image-wrap[style*="scale"] { overflow: visible; } /* allow panned content outside */
+/* ── Edit toolbar ────────────────────────────────────────────────── */
+.edit-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.edit-label   { font-size: 0.82rem; color: var(--muted); flex-shrink: 0; }
+.edit-btn {
+  flex: 1;
+  padding: 10px 6px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+.edit-btn.active { border-color: var(--accent); color: var(--text); }
+
+/* ── Add-size stepper ────────────────────────────────────────────── */
+.add-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.stepper { display: flex; align-items: center; gap: 10px; }
+.step-btn {
+  width: 46px; height: 46px;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  background: var(--border);
+  color: var(--text);
+  font-size: 1.4rem;
+  font-weight: 700;
+  padding: 0;
+}
+.stepper input[type=number] {
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+  text-align: center;
+  font-size: 1.1rem;
+  font-weight: 700;
+  background: var(--bg);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  -moz-appearance: textfield;
+}
+.stepper input[type=number]::-webkit-outer-spin-button,
+.stepper input[type=number]::-webkit-inner-spin-button {
+  -webkit-appearance: none; margin: 0;
+}
 
 /* ── Sections ────────────────────────────────────────────────────── */
 section { display: flex; flex-direction: column; gap: 12px; }
-section[hidden] { display: none !important; }
