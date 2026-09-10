@@ -48,8 +48,11 @@ const TARGET_OBJ_PX          = 110;
 const PROBE_CONF             = 0.12;
 const MIN_TILE               = 320;
 const MAX_TILE               = 1600;
-const MAX_TILES_STANDARD     = 48;
-const MAX_TILES_HIGH         = 96;
+// Each tile is a full model pass (~2s on a phone), so these are a scan-time
+// budget as much as a quality knob. 48 standard tiles meant multi-minute scans
+// on ordinary photos, which is not usable however good the result is.
+const MAX_TILES_STANDARD     = 20;
+const MAX_TILES_HIGH         = 40;
 
 const DB_NAME    = 'PipeCounterDB';
 const DB_VERSION = 1;
@@ -249,8 +252,16 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
   }
 
   let tileSize = STANDARD_TILE_SIZE;
-  const diam = probeBoxes
-    .filter(b => b.conf >= PROBE_CONF)
+  // Measure pipe size from the MOST CONFIDENT detections only.
+  //
+  // Filtering by an absolute score let through the small spurious boxes the
+  // model fires on the dark triangular gaps between stacked pipes. Those drag
+  // the median down, which shrinks the tile, which multiplies the tile count
+  // (slow) and stops whole large pipes fitting inside a tile at all — noise
+  // deciding the scale, and the scale then wrecking the detection. Ranking by
+  // confidence and taking the top slice keeps the estimate on real pipes.
+  const ranked = probeBoxes.slice().sort((a, b) => b.conf - a.conf).slice(0, 40);
+  const diam = ranked
     .map(b => Math.min(b.x2 - b.x1, b.y2 - b.y1))
     .sort((a, b) => a - b);
   if (diam.length >= 5) {
@@ -282,7 +293,8 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
   if (cancelToken?.cancelled) throw new Error('cancelled');
 
   // ── Merge + NMS ────────────────────────────────────────────────────────────
-  const selected = mergeDetections(allBoxes);
+  const merged   = mergeDetections(allBoxes);
+  const selected = dropSizeOutliers(merged);
 
   // ── Convert to percentage coordinates ─────────────────────────────────────
   return selected.map(box => {
@@ -565,6 +577,37 @@ function nms(boxes, threshold) {
     if (!kept.some(k => iou(b, k) > threshold)) kept.push(b);
   }
   return kept;
+}
+
+// A pipe end that is a fifth the size of every other pipe end in the same
+// photo is not a pipe end.
+//
+// The model fires weakly on the dark triangular gaps between stacked pipes,
+// producing a scatter of tiny circles — clearly visible sitting in the wedges
+// between real detections. They are small, and they are small *relative to
+// the pipes around them*, which is a far stronger signal than their score.
+//
+// The bounds are deliberately loose so genuinely mixed bundles survive: real
+// photos here mix diameters by well under 2x, and the size classifier still
+// needs that variation to label small/medium/large.
+const SIZE_OUTLIER_MIN = 0.45;
+const SIZE_OUTLIER_MAX = 2.20;
+
+function dropSizeOutliers(boxes) {
+  if (boxes.length < 8) return boxes;
+  // Anchor on the most confident detections, not on all of them, so a large
+  // crop of noise cannot define what "normal size" means.
+  const ranked = boxes.slice().sort((a, b) => b.conf - a.conf).slice(0, 40);
+  const dims = ranked
+    .map(b => Math.min(b.x2 - b.x1, b.y2 - b.y1))
+    .sort((a, b) => a - b);
+  const ref = dims[Math.floor(dims.length / 2)];
+  if (!(ref > 0)) return boxes;
+  const lo = ref * SIZE_OUTLIER_MIN, hi = ref * SIZE_OUTLIER_MAX;
+  return boxes.filter(b => {
+    const d = Math.min(b.x2 - b.x1, b.y2 - b.y1);
+    return d >= lo && d <= hi;
+  });
 }
 
 // Centre-distance de-duplication.
