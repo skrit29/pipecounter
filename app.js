@@ -273,16 +273,26 @@ function renderOverlay() {
   const ctx = overlayCanvas.getContext('2d');
   ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-  activePipes.forEach(pipe => {
-    const px = (pipe.x / 100) * overlayCanvas.width;
-    const py = (pipe.y / 100) * overlayCanvas.height;
-    const pr = Math.max(4, (pipe.radius / 100) * overlayCanvas.width);
+  activePipes.forEach((pipe, i) => {
+    const px  = (pipe.x / 100) * overlayCanvas.width;
+    const py  = (pipe.y / 100) * overlayCanvas.height;
+    const pr  = Math.max(4, (pipe.radius / 100) * overlayCanvas.width);
     const col = SIZE_COLORS[pipe.sizeCategory] ?? SIZE_COLORS.medium;
+
+    // Thin circle
     ctx.beginPath();
     ctx.arc(px, py, pr, 0, Math.PI * 2);
     ctx.strokeStyle = col;
-    ctx.lineWidth   = Math.max(2, pr * 0.14);
+    ctx.lineWidth   = Math.max(1.5, pr * 0.07);
     ctx.stroke();
+
+    // Number in centre
+    const fs = Math.max(8, Math.round(pr * 0.75));
+    ctx.font         = `bold ${fs}px -apple-system, sans-serif`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = col;
+    ctx.fillText(String(i + 1), px, py);
   });
 
   countLbl.textContent = activePipes.length;
@@ -360,16 +370,26 @@ document.getElementById('share-btn').addEventListener('click', async () => {
   const ctx = sc.getContext('2d');
   ctx.drawImage(scanImg, 0, 0, w, h);
 
-  activePipes.forEach(pipe => {
-    const px = (pipe.x / 100) * w;
-    const py = (pipe.y / 100) * h;
-    const pr = Math.max(6, (pipe.radius / 100) * w);
+  activePipes.forEach((pipe, i) => {
+    const px  = (pipe.x / 100) * w;
+    const py  = (pipe.y / 100) * h;
+    const pr  = Math.max(6, (pipe.radius / 100) * w);
     const col = SIZE_COLORS[pipe.sizeCategory] ?? SIZE_COLORS.medium;
+
+    // Thin circle
     ctx.beginPath();
     ctx.arc(px, py, pr, 0, Math.PI * 2);
     ctx.strokeStyle = col;
-    ctx.lineWidth   = Math.max(3, pr * 0.14);
+    ctx.lineWidth   = Math.max(2, pr * 0.07);
     ctx.stroke();
+
+    // Number in centre
+    const fs = Math.max(10, Math.round(pr * 0.75));
+    ctx.font         = `bold ${fs}px -apple-system, sans-serif`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = col;
+    ctx.fillText(String(i + 1), px, py);
   });
 
   // Count badge top-left
