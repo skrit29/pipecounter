@@ -95,21 +95,51 @@ setState('idle');
 
 document.getElementById('pick-btn').addEventListener('click', () => fileInput.click());
 
-fileInput.addEventListener('change', () => {
+fileInput.addEventListener('change', async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
   clearResults();
   imageWrap.hidden = false;
+  setStatus('Reading image…');
+
+  // Decode with createImageBitmap rather than letting an <img> do it.
+  //
+  // Mobile browsers — old Android WebView especially — silently downsample
+  // large JPEGs when decoding into an <img> to save memory. That is why the
+  // crop screen looked so low-resolution there, and it also meant detection
+  // ran on a shrunken image. createImageBitmap decodes at true size.
+  let bmp = null;
+  try {
+    if ('createImageBitmap' in window) bmp = await createImageBitmap(file);
+  } catch (_) { /* fall through to the <img> path below */ }
 
   const url = URL.createObjectURL(file);
   preview.onload = () => {
     preview.onload = null;      // don't re-fire when crop swaps the src
-    sourceImg = preview;
+    sourceImg = bmp || preview; // full-resolution source for crop + detection
+    setStatus('');
     setState('crop');
     waitForLayout(initCrop);
   };
-  preview.src = url;
+  // Feed the preview from the decoded bitmap so the crop screen is sharp even
+  // where the browser would have downsampled the file itself.
+  preview.src = bmp ? previewURLFromBitmap(bmp) : url;
 });
+
+// Render the bitmap into a canvas capped at a sane display size. Keeps the
+// crop view crisp without holding a full-resolution copy in the DOM.
+function previewURLFromBitmap(bmp) {
+  const MAXW = 1600;
+  const scale = Math.min(1, MAXW / bmp.width);
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const h = Math.max(1, Math.round(bmp.height * scale));
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const c = cv.getContext('2d');
+  c.imageSmoothingQuality = 'high';
+  c.drawImage(bmp, 0, 0, w, h);
+  return cv.toDataURL('image/jpeg', 0.92);
+}
 
 function waitForLayout(cb, tries = 0) {
   if (tries > 40) { cb(); return; }
@@ -289,27 +319,24 @@ document.getElementById('skip-crop-btn').addEventListener('click', () => {
 
 document.getElementById('apply-crop-btn').addEventListener('click', () => {
   const { x1, y1, x2, y2 } = crop;
-  const sw = sourceImg.naturalWidth, sh = sourceImg.naturalHeight;
+  // ImageBitmap exposes width/height; HTMLImageElement naturalWidth/Height.
+  const sw = sourceImg.naturalWidth  || sourceImg.width;
+  const sh = sourceImg.naturalHeight || sourceImg.height;
   const cx = Math.round(x1*sw), cy = Math.round(y1*sh);
   const cw = Math.round((x2-x1)*sw), ch = Math.round((y2-y1)*sh);
   if (cw < 32 || ch < 32) { setStatus('Crop area is too small.', true); return; }
 
+  // Crop straight into a canvas at full source resolution and scan THAT —
+  // no JPEG round-trip, so nothing is lost between cropping and detection.
   const tmp = document.createElement('canvas');
   tmp.width = cw; tmp.height = ch;
   const tctx = tmp.getContext('2d');
   tctx.imageSmoothingQuality = 'high';
   tctx.drawImage(sourceImg, cx, cy, cw, ch, 0, 0, cw, ch);
 
-  tmp.toBlob(blob => {
-    const url = URL.createObjectURL(blob);
-    const cropped = new Image();
-    cropped.onload = () => {
-      preview.src = url;               // show the cropped result
-      cropOverlayEl.hidden = true;
-      startScan(cropped);
-    };
-    cropped.src = url;
-  }, 'image/jpeg', 0.95);
+  cropOverlayEl.hidden = true;
+  preview.onload = () => { preview.onload = null; startScan(tmp); };
+  preview.src = tmp.toDataURL('image/jpeg', 0.92);   // display copy only
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -547,16 +574,27 @@ function renderOverlay() {
     ctx.lineWidth   = Math.max(1, pr * 0.07) / zs;
     ctx.stroke();
 
-    // Keep the label small enough that the pipe rim stays visible — a number
-    // filling the circle makes it impossible to check the detection. Shrink
-    // further for 2- and 3-digit labels so text WIDTH stays roughly constant.
-    const label  = String(i + 1);
-    const fs     = Math.max(8, Math.round(pr * 0.55 / Math.sqrt(label.length)));
+    // Labels are sized in SCREEN pixels, not image pixels.
+    //
+    // The canvas lives inside the zoom layer, so anything drawn here is
+    // magnified by the CSS transform. Sizing the number off the radius meant
+    // zooming in blew the digits up along with the pipe, so they always
+    // covered it. Dividing by the zoom keeps each number a constant size on
+    // screen: zoom in and the pipe grows while the number does not, which is
+    // what actually lets you check a detection.
+    const label    = String(i + 1);
+    const screenR  = pr * zs;                       // radius as it appears on screen
+    // Too small to read, and at hundreds of pipes the digits become a solid
+    // mat that hides the image entirely. Draw the ring only; zoom to label.
+    if (screenR < 9) return;
+    const fsScreen = Math.min(screenR * 0.5 / Math.sqrt(label.length), 15);
+    const fs       = fsScreen / zs;                 // back into canvas units
+
     ctx.font         = `bold ${fs}px -apple-system, sans-serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     // Dark halo keeps the number readable over both bright and dark pipes.
-    ctx.lineWidth   = Math.max(1, fs * 0.18) / zs;
+    ctx.lineWidth   = Math.max(1, fsScreen * 0.18) / zs;
     ctx.strokeStyle = 'rgba(0,0,0,0.8)';
     ctx.lineJoin    = 'round';
     ctx.strokeText(label, px, py);

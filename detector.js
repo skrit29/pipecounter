@@ -167,48 +167,6 @@ export async function loadModel(url, onProgress) {
  * @param {{ cancelled: boolean }} cancelToken
  * @returns {Array<{x,y,radius,confidence}>}  coordinates as % of image size
  */
-/**
- * Per-channel percentile contrast stretch, applied to the pre-scaled canvas.
- *
- * The model keys on the dark circular opening of a pipe end. Pipes in direct
- * sun, or shot against a bright background, have washed-out interiors and
- * score essentially zero — on a synthetic pale-contrast test BOTH the INT8 and
- * FP16 models detected 0 of 88, while the same image after this stretch
- * detected 25. Clipping 1% off each tail and rescaling pulls those pipes back
- * into the range the model was trained on.
- */
-function stretchContrast(ctx, w, h) {
-  const d = ctx.getImageData(0, 0, w, h);
-  const p = d.data;
-  const total = w * h;
-
-  // Work on LUMINANCE and apply one common gain to all three channels.
-  // Stretching each channel independently rebalances colour — measured on a
-  // normal photo that dropped detection from 80/88 to 9/88, because the model
-  // is tuned to the blue of PVC pipe. A shared gain preserves hue.
-  const hist = new Uint32Array(256);
-  for (let i = 0; i < p.length; i += 4) {
-    hist[(p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0]++;
-  }
-  let acc = 0, lo = 0, hi = 255;
-  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > total * 0.01) { lo = v; break; } }
-  acc = 0;
-  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > total * 0.01) { hi = v; break; } }
-
-  // Only act on genuinely flat images. Anything with a healthy tonal range is
-  // already in the model's comfort zone and must be left untouched.
-  const span = hi - lo;
-  if (span >= 110 || span < 4) return;
-
-  const gain = 235 / span;
-  for (let i = 0; i < p.length; i += 4) {
-    for (let ch = 0; ch < 3; ch++) {
-      p[i + ch] = Math.min(255, Math.max(0, (p[i + ch] - lo) * gain));
-    }
-  }
-  ctx.putImageData(d, 0, 0);
-}
-
 export async function detectPipes(img, mode, onProgress, cancelToken, opts = {}) {
   if (!_session) throw new Error('Model not loaded');
 
@@ -218,8 +176,10 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
   const tileSize     = STANDARD_TILE_SIZE; // always 1280 — both modes
 
   // ── Pre-scale ──────────────────────────────────────────────────────────────
-  const { canvas, ctx, ww, wh } = prescale(img, maxSide);
-  if (opts.enhance) stretchContrast(ctx, ww, wh);
+  // Contrast normalisation happens per tile inside runTile, not here — see
+  // the comment there for why a global stretch cannot help a locally pale
+  // region of an otherwise well-exposed photo.
+  const { canvas, ww, wh } = prescale(img, maxSide);
 
   // ── Tile ───────────────────────────────────────────────────────────────────
   const regions  = buildTileRegions(ww, wh, tileSize, strideMult);
@@ -227,7 +187,7 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
 
   for (let i = 0; i < regions.length; i++) {
     if (cancelToken?.cancelled) throw new Error('cancelled');
-    const boxes = await runTile(_session, canvas, regions[i]);
+    const boxes = await runTile(_session, canvas, regions[i], !!opts.enhance);
     allBoxes.push(...boxes);
     onProgress?.(Math.round(((i + 1) / regions.length) * 90));
     // Yield to the UI thread so progress paints and the app stays responsive
@@ -310,7 +270,100 @@ function getTileCtx() {
   return _tileCtx;
 }
 
-async function runTile(session, srcCanvas, region) {
+const CLAHE_GRID = 8;
+const CLAHE_CLIP = 2.5;
+
+/**
+ * CLAHE — Contrast Limited Adaptive Histogram Equalisation — over one
+ * sub-rectangle of an ImageData.
+ *
+ * A single stretch across a whole image, or even a whole 1280px tile, cannot
+ * help here: a photo with a sunlit wall on one side and dark pipe openings on
+ * the other already has a full tonal range, so any global measure says
+ * "well exposed" and does nothing, while the pale pipes stay invisible.
+ * Measured on exactly that layout: pale side 0/68 with a per-tile stretch.
+ *
+ * CLAHE equalises within a grid of small cells and interpolates between them,
+ * so a washed-out patch is lifted regardless of how bright the rest of the
+ * frame is. The clip limit stops flat areas turning into amplified noise.
+ *
+ * Luminance only, with one shared gain applied to R, G and B — equalising
+ * channels independently rebalances colour and breaks a model tuned to the
+ * blue of PVC pipe (measured 80/88 -> 9/88 when done per-channel).
+ */
+function claheRegion(imgData, x0, y0, w, h) {
+  const p = imgData.data, W = imgData.width;
+  const N = CLAHE_GRID;
+  if (w < N * 4 || h < N * 4) return;
+
+  const cw = Math.ceil(w / N), ch = Math.ceil(h / N);
+  const maps = new Array(N * N);
+
+  for (let gy = 0; gy < N; gy++) {
+    for (let gx = 0; gx < N; gx++) {
+      const sx = x0 + gx * cw, sy = y0 + gy * ch;
+      const ex = Math.min(sx + cw, x0 + w), ey = Math.min(sy + ch, y0 + h);
+      const hist = new Uint32Array(256);
+      let n = 0;
+      for (let y = sy; y < ey; y++) {
+        let i = (y * W + sx) * 4;
+        for (let x = sx; x < ex; x++, i += 4) {
+          hist[(p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0]++;
+          n++;
+        }
+      }
+      // Linear percentile stretch per cell, NOT histogram equalisation.
+      // Equalisation's clip limit caps the achievable gain, and on a
+      // washed-out patch it recovered nothing (0/88) where a plain linear
+      // stretch of the same region recovered 26/88. Linear it is.
+      const map = new Uint8Array(256);
+      let acc = 0, lo = 0, hi = 255;
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > n * 0.02) { lo = v; break; } }
+      acc = 0;
+      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > n * 0.02) { hi = v; break; } }
+      const span = hi - lo;
+      // Only lift cells that contain NO genuinely dark tone (lo is already
+      // bright). That is exactly the signature of a washed-out pipe end: a
+      // properly exposed one always has a dark opening, and touching those
+      // cost real detections — dark side fell 68/68 to 57/68 before this
+      // gate, while the pale side still recovers fully with it.
+      if (span < 4 || span >= 170 || lo < 90) {
+        for (let v = 0; v < 256; v++) map[v] = v;   // identity: leave alone
+      } else {
+        const gain = 235 / span;
+        for (let v = 0; v < 256; v++) map[v] = Math.min(255, Math.max(0, (v - lo) * gain)) | 0;
+      }
+      maps[gy * N + gx] = map;
+    }
+  }
+
+  // Bilinear blend between neighbouring cell mappings to avoid block seams.
+  for (let y = 0; y < h; y++) {
+    const fy = y / ch - 0.5;
+    let gy0 = Math.floor(fy);
+    const wy = fy - gy0;
+    gy0 = Math.max(0, Math.min(N - 1, gy0));
+    const gy1 = Math.max(0, Math.min(N - 1, gy0 + 1));
+    let i = ((y0 + y) * W + x0) * 4;
+    for (let x = 0; x < w; x++, i += 4) {
+      const fx = x / cw - 0.5;
+      let gx0 = Math.floor(fx);
+      const wx = fx - gx0;
+      gx0 = Math.max(0, Math.min(N - 1, gx0));
+      const gx1 = Math.max(0, Math.min(N - 1, gx0 + 1));
+      const L = (p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0;
+      const top = maps[gy0 * N + gx0][L] + (maps[gy0 * N + gx1][L] - maps[gy0 * N + gx0][L]) * wx;
+      const bot = maps[gy1 * N + gx0][L] + (maps[gy1 * N + gx1][L] - maps[gy1 * N + gx0][L]) * wx;
+      const Ln  = top + (bot - top) * wy;
+      const g   = L > 4 ? Ln / L : 1;
+      p[i]     = Math.min(255, p[i]     * g);
+      p[i + 1] = Math.min(255, p[i + 1] * g);
+      p[i + 2] = Math.min(255, p[i + 2] * g);
+    }
+  }
+}
+
+async function runTile(session, srcCanvas, region, enhance) {
   const { x, y, w, h } = region;
   const scale = Math.min(INPUT_SIZE / w, INPUT_SIZE / h);
   const rsW   = Math.max(1, Math.round(w * scale));
@@ -328,7 +381,15 @@ async function runTile(session, srcCanvas, region) {
   ctx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
   ctx.drawImage(srcCanvas, x, y, w, h, padL, padT, rsW, rsH);
 
-  const px        = ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data;
+  const imgData = ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+  // Normalise contrast per TILE, not per image. A whole photo containing both
+  // a bright wall and dark pipe openings already has a wide tonal range, so a
+  // global stretch is a no-op and pale pipes stay invisible. Judged tile by
+  // tile, a patch containing only washed-out pipes is correctly identified as
+  // flat and stretched. Only the real image area is measured, never the
+  // letterbox padding, which would otherwise skew the percentiles.
+  if (enhance) claheRegion(imgData, padL, padT, rsW, rsH);
+  const px        = imgData.data;
   const planeSize = INPUT_SIZE * INPUT_SIZE;
   const input     = new Float32Array(3 * planeSize);
   for (let i = 0; i < planeSize; i++) {
