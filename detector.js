@@ -130,11 +130,14 @@ async function saveModelToDB(db, buffer) {
 let _session = null;
 
 /**
- * Load the ONNX model.  On the first call the model is fetched from `url`,
- * stored in IndexedDB, and the ONNX session is created.  Subsequent calls
- * (even offline) read the model bytes directly from IndexedDB.
+ * Load the ONNX model.  On the first call the model is fetched, stored in
+ * IndexedDB, and the ONNX session is created.  Subsequent calls (even
+ * offline) read the model bytes directly from IndexedDB.
  *
- * @param {string} url   URL of the .onnx file (relative or absolute)
+ * @param {string|string[]} url  URL(s) of the .onnx file. When several are
+ *        given they are tried in order, so the model can live outside the
+ *        published site (a GitHub Release asset) while a copy committed in
+ *        the repo still works as a fallback for self-hosted checkouts.
  * @param {Function} onProgress  (0-100) called during the initial download
  */
 export async function loadModel(url, onProgress) {
@@ -147,8 +150,16 @@ export async function loadModel(url, onProgress) {
   if (!buffer) {
     // First load: fetch with progress.
     onProgress?.(0);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Failed to fetch model: ${response.status}`);
+    const candidates = Array.isArray(url) ? url : [url];
+    let response = null, lastErr = null;
+    for (const u of candidates) {
+      try {
+        const r = await fetch(u);
+        if (r.ok) { response = r; break; }
+        lastErr = new Error(`${r.status} from ${u}`);
+      } catch (e) { lastErr = e; }
+    }
+    if (!response) throw new Error(`Failed to fetch model: ${lastErr?.message || 'no source reachable'}`);
     const total  = parseInt(response.headers.get('Content-Length') || '0');
     const reader = response.body.getReader();
     const chunks = [];

@@ -2,3 +2,7 @@ make-icons.js
 node_modules/
 *.DS_Store
 Thumbs.db
+
+# Model lives on the model-store branch; keep the local copy out of the
+# published site so Pages deploys stay small and fast.
+assets/models/*.onnx

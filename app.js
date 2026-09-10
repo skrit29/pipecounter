@@ -8,7 +8,21 @@ import { applyRelativeSizes, buildSizeBreakdown } from './pipeBreakdown.js';
 // offset from their pipe, wrong radii, and duplicate detections at shifted
 // positions. FP16 matches FP32 to 0.59px and correlates 1.00000 on
 // confidence, at 1.6x the inference time. Downloaded once, then cached.
-const MODEL_URL   = './assets/models/pipe-counter-fp16.onnx';
+// Fetched from the `model-store` branch, which GitHub Pages does not publish.
+//
+// A ~50MB file inside the published tree has to be re-uploaded on every deploy,
+// and that was consistently pushing the deployment past its timeout — fixes
+// stopped reaching the live site entirely. Parking the model on a branch that
+// is never published keeps the deployed site under a megabyte, so deploys are
+// fast again, while raw.githubusercontent.com serves the file with
+// Access-Control-Allow-Origin: * so the browser can fetch it cross-origin.
+// It is still downloaded once and then cached in IndexedDB, so offline use is
+// unchanged. The relative path stays as a fallback for local checkouts that
+// have the model sitting next to the app.
+const MODEL_URL   = [
+  'https://raw.githubusercontent.com/skrit29/pipecounter/model-store/assets/models/pipe-counter-fp16.onnx',
+  './assets/models/pipe-counter-fp16.onnx',
+];
 const SIZE_COLORS = { small: '#FF7A00', medium: '#FFD60A', large: '#39FF14' };
 
 // Sensitivity slider maps 0..100 → confidence cutoff (%).
