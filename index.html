@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no"/>
   <title>PipeCounter</title>
 
   <!-- PWA -->
@@ -46,6 +46,16 @@
         <div class="mode-sub">Slower · catches small pipes</div>
       </label>
     </div>
+    <!-- Confidence / sensitivity slider -->
+    <div class="slider-row">
+      <label class="slider-label" for="conf-slider">
+        Detection sensitivity:
+        <span id="conf-val">Medium</span>
+      </label>
+      <input type="range" id="conf-slider" min="5" max="50" step="1" value="20"/>
+      <div class="slider-ticks"><span>Low</span><span>High</span></div>
+    </div>
+
     <button class="btn-accent full-width" id="pick-btn">📷 Pick Image</button>
     <input type="file" id="file-input" accept="image/*" hidden/>
   </section>
@@ -79,11 +89,21 @@
     <div class="breakdown" id="breakdown"></div>
 
     <div class="edit-toolbar">
-      <span class="edit-label">Tap circle to:</span>
+      <span class="edit-label">Action:</span>
       <button class="edit-btn active" id="btn-remove">✕ Remove</button>
       <button class="edit-btn"        id="btn-add">＋ Add</button>
     </div>
-    <p class="hint" id="edit-hint">Tap a circle on the image to remove it.</p>
+
+    <!-- Size filter — shown for both add and remove -->
+    <div class="edit-toolbar" id="size-toolbar">
+      <span class="edit-label">Size:</span>
+      <button class="edit-btn size-btn" id="sz-small"  data-size="small">● Small</button>
+      <button class="edit-btn size-btn active" id="sz-any" data-size="any">◎ Any</button>
+      <button class="edit-btn size-btn" id="sz-large"  data-size="large">◉ Large</button>
+    </div>
+
+    <p class="hint" id="edit-hint">Tap a circle on the image to remove it.
+       Pinch to zoom · drag to pan when zoomed.</p>
 
     <div class="action-row">
       <button class="btn-secondary" id="share-btn">⬆ Share</button>

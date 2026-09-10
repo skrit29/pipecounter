@@ -7,7 +7,10 @@ const INPUT_SIZE             = 640;
 const STANDARD_TILE_SIZE     = 1280;
 const MAX_STANDARD_SIDE      = 1920;
 const MAX_HIGH_SIDE          = 2560;
-const CONFIDENCE_THRESHOLD   = 0.22; // lower for INT8 model (scores shift down vs FP32)
+let   CONFIDENCE_THRESHOLD   = 0.20; // lower for INT8 model (scores shift down vs FP32)
+
+/** Update confidence threshold at runtime (0-1). Called from UI slider. */
+export function setThreshold(v) { CONFIDENCE_THRESHOLD = Math.min(0.95, Math.max(0.02, v)); }
 const IOU_THRESHOLD          = 0.45;
 const SMALLER_BOX_OVERLAP    = 0.88;
 const NESTED_MAX_SIZE_RATIO  = 0.58;
