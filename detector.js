@@ -10,7 +10,7 @@ const MAX_HIGH_SIDE          = 2560;
 // Detection floor. We deliberately keep everything down to a very low score
 // and let the UI sensitivity slider filter the results afterwards, so the
 // user can tune the count without paying for a re-scan.
-const CONFIDENCE_THRESHOLD   = 0.08;
+const CONFIDENCE_THRESHOLD   = 0.06;
 const IOU_THRESHOLD          = 0.45;
 const SMALLER_BOX_OVERLAP    = 0.88;
 const NESTED_MAX_SIZE_RATIO  = 0.58;
@@ -340,10 +340,16 @@ function mergeDetections(boxes) {
   // is both standard NMS behaviour and visibly tighter.
   const filtered = [];
   for (const b of boxes.sort((a, b2) => b2.conf - a.conf)) {
-    const dup = filtered.some(k =>
-      intersectionOverSmaller(b, k) > SMALLER_BOX_OVERLAP &&
-      !plausibleNested(b, k)
-    );
+    const dup = filtered.some(k => {
+      if (intersectionOverSmaller(b, k) <= SMALLER_BOX_OVERLAP) return false;
+      // Heavy overlap alone is not enough. Only treat the pair as the same
+      // pipe when the two boxes are also comparable in size — otherwise a
+      // small confident detection sitting inside a big pipe would evict the
+      // big pipe entirely, which is how large pipes went missing. Genuinely
+      // different sizes fall through to the IoU pass below, which keeps both.
+      const ratio = Math.sqrt(Math.min(area(b), area(k)) / Math.max(area(b), area(k), 1e-10));
+      return ratio > NESTED_MAX_SIZE_RATIO;
+    });
     if (!dup) filtered.push(b);
   }
   return nms(filtered, IOU_THRESHOLD);

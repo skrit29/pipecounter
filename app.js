@@ -8,7 +8,7 @@ const SIZE_COLORS = { small: '#FF7A00', medium: '#FFD60A', large: '#39FF14' };
 // Sensitivity slider maps 0..100 → confidence cutoff (%).
 // Left (0)  = Low  sensitivity = high cutoff = fewer, surer detections.
 // Right(100)= High sensitivity = low  cutoff = more, noisier detections.
-const CUT_MIN = 8;    // cutoff at slider 100
+const CUT_MIN = 6;    // cutoff at slider 100 (matches the detector's floor)
 const CUT_MAX = 60;   // cutoff at slider 0
 const sliderToCutoff = v => CUT_MIN + ((100 - v) / 100) * (CUT_MAX - CUT_MIN);
 
@@ -135,16 +135,35 @@ function initCrop() {
   drawCrop();
 }
 
-// Size a canvas backing store to the preview's *layout* box.
-// offsetWidth/Height ignore CSS transforms, unlike getBoundingClientRect.
+// Backing-store scale factor. The canvas must be allocated at the DISPLAY's
+// real pixel density or everything drawn on it is upscaled and looks soft —
+// on a 3x phone that meant rendering at a third of the panel's resolution.
+// When zoomed we supersample further, since CSS scales the canvas up too.
+function canvasScale() {
+  const dpr = window.devicePixelRatio || 1;
+  // Hold the current scale steady during a pinch; reallocating the backing
+  // store every frame would stutter. It re-sharpens when the gesture ends.
+  if (pinch.active && overlayCanvas._ss) return overlayCanvas._ss;
+  return dpr * Math.min(3, Math.max(1, zoom.scale));
+}
+
+// Size a canvas backing store to the preview's *layout* box, at device
+// resolution. offsetWidth/Height ignore CSS transforms, unlike
+// getBoundingClientRect. The context is then scaled so all drawing code can
+// keep working in CSS-pixel units.
 function sizeCanvasToPreview(canvas) {
-  canvas.width  = Math.max(1, preview.offsetWidth);
-  canvas.height = Math.max(1, preview.offsetHeight);
+  const ss   = canvasScale();
+  const cssW = Math.max(1, preview.offsetWidth);
+  const cssH = Math.max(1, preview.offsetHeight);
+  canvas.width  = Math.round(cssW * ss);
+  canvas.height = Math.round(cssH * ss);
+  canvas.getContext('2d').setTransform(ss, 0, 0, ss, 0, 0);
+  canvas._cssW = cssW; canvas._cssH = cssH; canvas._ss = ss;
 }
 
 function drawCrop() {
   const c = cropOverlayEl, ctx = c.getContext('2d');
-  const w = c.width, h = c.height;
+  const w = c._cssW || c.width, h = c._cssH || c.height;
   const { x1, y1, x2, y2 } = crop;
   const [px1, py1, px2, py2] = [x1*w, y1*h, x2*w, y2*h];
 
@@ -199,8 +218,8 @@ function cropHandleAt(x, y) {
   const { x1, y1, x2, y2 } = crop;
   // Hit radius in normalised units, scaled off the canvas size so the
   // touch target is a comfortable ~40px regardless of image dimensions.
-  const tx = 40 / Math.max(1, cropOverlayEl.width);
-  const ty = 40 / Math.max(1, cropOverlayEl.height);
+  const tx = 40 / Math.max(1, cropOverlayEl._cssW || cropOverlayEl.width);
+  const ty = 40 / Math.max(1, cropOverlayEl._cssH || cropOverlayEl.height);
   const near = (px, py) => Math.abs(x - px) < tx && Math.abs(y - py) < ty;
   if (near(x1, y1)) return 'tl';
   if (near(x2, y1)) return 'tr';
@@ -309,7 +328,10 @@ function resetZoom() {
   zoomLayer.style.transform = '';
 }
 
-document.getElementById('reset-zoom-btn').addEventListener('click', resetZoom);
+document.getElementById('reset-zoom-btn').addEventListener('click', () => {
+  resetZoom();
+  renderOverlay();   // drop the supersampled backing store back to 1x
+});
 
 overlayCanvas.addEventListener('touchstart', e => {
   if (e.touches.length === 1) {
@@ -361,6 +383,7 @@ overlayCanvas.addEventListener('touchend', e => {
   if (pinch.active && e.touches.length < 2) {
     pinch.active = false;
     if (zoom.scale <= 1.02) resetZoom();
+    renderOverlay();          // re-allocate at the new zoom so circles sharpen
   }
   pan.active = false;
 
@@ -379,9 +402,45 @@ overlayCanvas.addEventListener('touchcancel', () => {
   pinch.active = false; pan.active = false; tapStart = null;
 });
 
-// Desktop
+// ── Desktop: wheel to zoom, click-drag to pan, click to add/remove ────
+let usedTouch = false;
+let mouseDrag = null, mouseMoved = false;
+
+overlayCanvas.addEventListener('touchstart', () => { usedTouch = true; }, { passive: true });
+
+overlayCanvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r  = imageWrap.getBoundingClientRect();
+  const ox = e.clientX - r.left, oy = e.clientY - r.top;
+  const s  = Math.min(6, Math.max(1, zoom.scale * Math.exp(-e.deltaY * 0.0018)));
+  const k  = s / zoom.scale;
+  // Keep the point under the cursor fixed while scaling
+  zoom.tx = ox - (ox - zoom.tx) * k;
+  zoom.ty = oy - (oy - zoom.ty) * k;
+  zoom.scale = s;
+  if (s <= 1.02) resetZoom(); else applyZoom();
+  renderOverlay();
+}, { passive: false });
+
+overlayCanvas.addEventListener('mousedown', e => {
+  mouseDrag  = { x: e.clientX, y: e.clientY, tx: zoom.tx, ty: zoom.ty };
+  mouseMoved = false;
+});
+window.addEventListener('mousemove', e => {
+  if (!mouseDrag) return;
+  const dx = e.clientX - mouseDrag.x, dy = e.clientY - mouseDrag.y;
+  if (Math.hypot(dx, dy) > 4) mouseMoved = true;
+  if (zoom.scale > 1 && mouseMoved) {
+    zoom.tx = mouseDrag.tx + dx;
+    zoom.ty = mouseDrag.ty + dy;
+    applyZoom();
+  }
+});
+window.addEventListener('mouseup', () => { mouseDrag = null; });
+
 overlayCanvas.addEventListener('click', e => {
-  if ('ontouchstart' in window) return;   // touch devices use the tap handler
+  if (usedTouch) return;   // touch devices go through the tap handler
+  if (mouseMoved) return;  // that was a pan, not a click
   handleTap(e.clientX, e.clientY);
 });
 
@@ -451,17 +510,21 @@ function renderOverlay() {
   // resizing the canvas to 1px would throw the drawing away. Skip and let
   // the resize/visibility handler redraw once real dimensions come back.
   if (preview.offsetWidth < 2) return;
-  if (overlayCanvas.width !== preview.offsetWidth) sizeCanvasToPreview(overlayCanvas);
+  const ss = canvasScale();
+  if (overlayCanvas._cssW !== preview.offsetWidth || overlayCanvas._ss !== ss) {
+    sizeCanvasToPreview(overlayCanvas);
+  }
+  const W = overlayCanvas._cssW, H = overlayCanvas._cssH;
   const ctx = overlayCanvas.getContext('2d');
-  ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  ctx.clearRect(0, 0, W, H);
 
   // Thinner strokes as you zoom in, so circles stay crisp
   const zs = zoom.scale;
 
   activePipes.forEach((pipe, i) => {
-    const px  = (pipe.x / 100) * overlayCanvas.width;
-    const py  = (pipe.y / 100) * overlayCanvas.height;
-    const pr  = Math.max(3, (pipe.radius / 100) * overlayCanvas.width);
+    const px  = (pipe.x / 100) * W;
+    const py  = (pipe.y / 100) * H;
+    const pr  = Math.max(3, (pipe.radius / 100) * W);
     const col = SIZE_COLORS[pipe.sizeCategory] ?? SIZE_COLORS.medium;
 
     ctx.beginPath();
@@ -487,7 +550,7 @@ function renderOverlay() {
 // drawn at the centre of whatever part of the image is currently on screen
 // so it sits right next to real pipes for comparison.
 function drawAddPreview(ctx, zs) {
-  const W = overlayCanvas.width, H = overlayCanvas.height;
+  const W = overlayCanvas._cssW, H = overlayCanvas._cssH;
   const s = zoom.scale;
   // Map the centre of the visible viewport back into canvas coordinates.
   const cx = ((imageWrap.clientWidth  / 2) - zoom.tx) / s;
@@ -560,9 +623,12 @@ document.querySelectorAll('.size-btn').forEach(btn => {
 });
 
 function updateHint() {
+  const gesture = matchMedia('(pointer: coarse)').matches
+    ? 'Pinch to zoom · drag to pan.'
+    : 'Scroll wheel to zoom · drag to pan · Fit to reset.';
   editHint.textContent = editMode === 'remove'
-    ? `Tap a ${removeSize === 'any' ? '' : removeSize + ' '}circle to remove it. Pinch to zoom · drag to pan.`
-    : `Tap the image to add a ${addSizeInput.value}px pipe. Pinch to zoom · drag to pan.`;
+    ? `Tap a ${removeSize === 'any' ? '' : removeSize + ' '}circle to remove it. ${gesture}`
+    : `Tap the image to add a ${addSizeInput.value}px pipe. ${gesture}`;
 }
 
 // ── Add-size picker (slider + number + live preview) ──────────────────
@@ -606,7 +672,7 @@ function handleTap(clientX, clientY) {
   const tapY = ((clientY - r.top)  / r.height) * 100;
   if (tapX < 0 || tapX > 100 || tapY < 0 || tapY > 100) return;
 
-  const aspect = overlayCanvas.height / overlayCanvas.width;
+  const aspect = overlayCanvas._cssH / overlayCanvas._cssW;
 
   if (editMode === 'remove') {
     let best = null, bestDist = Infinity;
