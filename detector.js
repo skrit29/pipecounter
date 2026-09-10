@@ -12,10 +12,13 @@ const MAX_HIGH_SIDE          = 2560;
 // user can tune the count without paying for a re-scan.
 const CONFIDENCE_THRESHOLD   = 0.06;
 const IOU_THRESHOLD          = 0.45;
-// Two detections whose centres are closer than this fraction of the larger
-// radius are the same pipe. Safe by construction: distinct pipe ends cannot
-// overlap, so their centres are always at least r1+r2 (> max r) apart.
-const CENTRE_DEDUP_FRAC      = 0.75;
+// Two detections whose centres are closer than this fraction of (r1 + r2)
+// are the same pipe. r1+r2 is exactly the distance at which two pipe ends
+// touch, so anything closer would have to physically overlap — impossible.
+// The margin is wide: equal touching pipes sit at 1.0 of that sum while
+// duplicates cluster below 0.65. Basing it on the SUM rather than the larger
+// radius is what makes it correct for a small pipe beside a large one.
+const CENTRE_DEDUP_FRAC      = 0.65;
 const SMALLER_BOX_OVERLAP    = 0.88;
 const NESTED_MAX_SIZE_RATIO  = 0.58;
 const MIN_BOX_SIDE_MODEL_PX  = 4;
@@ -27,34 +30,74 @@ const MAX_REGION_CANDIDATES  = 2000;
 const DB_NAME    = 'PipeCounterDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'models';
-const MODEL_KEY  = 'pipe-counter';
+// Keyed by build. Changing this forces existing installs to fetch the new
+// model instead of reusing the cached INT8 bytes from a previous version.
+const MODEL_KEY  = 'pipe-counter-fp16';
 
 // ── IndexedDB helpers ─────────────────────────────────────────────────────────
 
+// Resolves to null rather than hanging or throwing. IndexedDB can be blocked
+// by another tab mid-upgrade, or unavailable entirely (private browsing, or
+// storage disabled), and previously either case left the app stuck on
+// "Loading AI model…" forever with no way out. The cache is an optimisation,
+// never a requirement — if it isn't there we just fetch the model.
 function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE_NAME);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
+  return new Promise(resolve => {
+    let settled = false;
+    const done = v => { if (!settled) { settled = true; resolve(v); } };
+    // Never wait more than a few seconds on storage.
+    setTimeout(() => done(null), 4000);
+    try {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE_NAME);
+      req.onsuccess = () => done(req.result);
+      req.onerror   = () => done(null);
+      req.onblocked = () => done(null);
+    } catch (_) {
+      done(null);
+    }
   });
 }
 
 async function getModelFromDB(db) {
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(STORE_NAME, 'readonly');
-    const req = tx.objectStore(STORE_NAME).get(MODEL_KEY);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror   = () => reject(req.error);
+  if (!db) return null;
+  return new Promise(resolve => {
+    try {
+      const tx  = db.transaction(STORE_NAME, 'readonly');
+      const req = tx.objectStore(STORE_NAME).get(MODEL_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror   = () => resolve(null);
+    } catch (_) { resolve(null); }
+  });
+}
+
+// Free the previous build's cached model so upgrading doesn't leave ~26MB
+// of dead weight in the user's browser storage.
+async function purgeOldModels(db) {
+  if (!db) return;
+  return new Promise(resolve => {
+    try {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.getAllKeys();
+      req.onsuccess = () => {
+        for (const k of req.result || []) if (k !== MODEL_KEY) store.delete(k);
+        resolve();
+      };
+      req.onerror = () => resolve();
+    } catch (_) { resolve(); }
   });
 }
 
 async function saveModelToDB(db, buffer) {
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(STORE_NAME, 'readwrite');
-    const req = tx.objectStore(STORE_NAME).put(buffer, MODEL_KEY);
-    req.onsuccess = () => resolve();
-    req.onerror   = () => reject(req.error);
+  if (!db) return;
+  return new Promise(resolve => {
+    try {
+      const tx  = db.transaction(STORE_NAME, 'readwrite');
+      const req = tx.objectStore(STORE_NAME).put(buffer, MODEL_KEY);
+      req.onsuccess = () => resolve();
+      req.onerror   = () => resolve();   // caching is best-effort
+    } catch (_) { resolve(); }
   });
 }
 
@@ -74,6 +117,7 @@ export async function loadModel(url, onProgress) {
   if (_session) return _session;
 
   const db     = await openDB();
+  await purgeOldModels(db);
   let   buffer = await getModelFromDB(db);
 
   if (!buffer) {
@@ -123,7 +167,49 @@ export async function loadModel(url, onProgress) {
  * @param {{ cancelled: boolean }} cancelToken
  * @returns {Array<{x,y,radius,confidence}>}  coordinates as % of image size
  */
-export async function detectPipes(img, mode, onProgress, cancelToken) {
+/**
+ * Per-channel percentile contrast stretch, applied to the pre-scaled canvas.
+ *
+ * The model keys on the dark circular opening of a pipe end. Pipes in direct
+ * sun, or shot against a bright background, have washed-out interiors and
+ * score essentially zero — on a synthetic pale-contrast test BOTH the INT8 and
+ * FP16 models detected 0 of 88, while the same image after this stretch
+ * detected 25. Clipping 1% off each tail and rescaling pulls those pipes back
+ * into the range the model was trained on.
+ */
+function stretchContrast(ctx, w, h) {
+  const d = ctx.getImageData(0, 0, w, h);
+  const p = d.data;
+  const total = w * h;
+
+  // Work on LUMINANCE and apply one common gain to all three channels.
+  // Stretching each channel independently rebalances colour — measured on a
+  // normal photo that dropped detection from 80/88 to 9/88, because the model
+  // is tuned to the blue of PVC pipe. A shared gain preserves hue.
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < p.length; i += 4) {
+    hist[(p[i] * 0.299 + p[i + 1] * 0.587 + p[i + 2] * 0.114) | 0]++;
+  }
+  let acc = 0, lo = 0, hi = 255;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > total * 0.01) { lo = v; break; } }
+  acc = 0;
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > total * 0.01) { hi = v; break; } }
+
+  // Only act on genuinely flat images. Anything with a healthy tonal range is
+  // already in the model's comfort zone and must be left untouched.
+  const span = hi - lo;
+  if (span >= 110 || span < 4) return;
+
+  const gain = 235 / span;
+  for (let i = 0; i < p.length; i += 4) {
+    for (let ch = 0; ch < 3; ch++) {
+      p[i + ch] = Math.min(255, Math.max(0, (p[i + ch] - lo) * gain));
+    }
+  }
+  ctx.putImageData(d, 0, 0);
+}
+
+export async function detectPipes(img, mode, onProgress, cancelToken, opts = {}) {
   if (!_session) throw new Error('Model not loaded');
 
   const highRes      = mode === 'high';
@@ -132,7 +218,8 @@ export async function detectPipes(img, mode, onProgress, cancelToken) {
   const tileSize     = STANDARD_TILE_SIZE; // always 1280 — both modes
 
   // ── Pre-scale ──────────────────────────────────────────────────────────────
-  const { canvas, ww, wh } = prescale(img, maxSide);
+  const { canvas, ctx, ww, wh } = prescale(img, maxSide);
+  if (opts.enhance) stretchContrast(ctx, ww, wh);
 
   // ── Tile ───────────────────────────────────────────────────────────────────
   const regions  = buildTileRegions(ww, wh, tileSize, strideMult);
@@ -355,7 +442,7 @@ function dedupeByCentre(boxes) {
     for (const k of kept) {
       const kx = (k.x1 + k.x2) / 2, ky = (k.y1 + k.y2) / 2;
       const kr = Math.min(k.x2 - k.x1, k.y2 - k.y1) / 2;
-      if (Math.hypot(bx - kx, by - ky) < CENTRE_DEDUP_FRAC * Math.max(br, kr)) {
+      if (Math.hypot(bx - kx, by - ky) < CENTRE_DEDUP_FRAC * (br + kr)) {
         dup = true;
         break;
       }

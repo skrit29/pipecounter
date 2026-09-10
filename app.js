@@ -2,7 +2,13 @@
 import { loadModel, detectPipes } from './detector.js';
 import { applyRelativeSizes, buildSizeBreakdown } from './pipeBreakdown.js';
 
-const MODEL_URL   = './assets/models/pipe-counter-int8.onnx';
+// FP16 model (52MB). The old INT8 build was 26MB but dynamic quantisation
+// wrecked the box-regression head — measured against FP32, box coordinates
+// were off by up to 167px on a 640px input, which is what produced circles
+// offset from their pipe, wrong radii, and duplicate detections at shifted
+// positions. FP16 matches FP32 to 0.59px and correlates 1.00000 on
+// confidence, at 1.6x the inference time. Downloaded once, then cached.
+const MODEL_URL   = './assets/models/pipe-counter-fp16.onnx';
 const SIZE_COLORS = { small: '#FF7A00', medium: '#FFD60A', large: '#39FF14' };
 
 // Sensitivity slider maps 0..100 → confidence cutoff (%).
@@ -460,7 +466,8 @@ async function startScan(img) {
   try {
     const mode = modeHigh.checked ? 'high' : 'standard';
     const found = await detectPipes(img, mode,
-      pct => setProgress(pct, `Scanning… ${pct}%`), cancelToken);
+      pct => setProgress(pct, `Scanning… ${pct}%`), cancelToken,
+      { enhance: document.getElementById('enhance-chk').checked });
 
     // Keep every candidate; the sensitivity slider filters them live.
     rawPipes    = found.map((p, i) => ({ ...p, id: i }));

@@ -122,6 +122,21 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .mode-btn.selected { border-color: var(--accent); color: var(--text); }
 .mode-sub { font-size: 0.73rem; font-weight: 400; color: var(--muted); margin-top: 3px; }
 
+/* ── Toggle row ──────────────────────────────────────────────────── */
+.toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+.toggle-row input { width: 20px; height: 20px; accent-color: var(--accent); flex-shrink: 0; margin-top: 1px; }
+.toggle-row .mode-sub { display: block; margin-top: 2px; }
+
 /* ── Hint text ───────────────────────────────────────────────────── */
 .hint { font-size: 0.82rem; color: var(--muted); line-height: 1.4; text-align: center; }
 
