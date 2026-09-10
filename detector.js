@@ -12,6 +12,10 @@ const MAX_HIGH_SIDE          = 2560;
 // user can tune the count without paying for a re-scan.
 const CONFIDENCE_THRESHOLD   = 0.06;
 const IOU_THRESHOLD          = 0.45;
+// Two detections whose centres are closer than this fraction of the larger
+// radius are the same pipe. Safe by construction: distinct pipe ends cannot
+// overlap, so their centres are always at least r1+r2 (> max r) apart.
+const CENTRE_DEDUP_FRAC      = 0.75;
 const SMALLER_BOX_OVERLAP    = 0.88;
 const NESTED_MAX_SIZE_RATIO  = 0.58;
 const MIN_BOX_SIDE_MODEL_PX  = 4;
@@ -254,7 +258,7 @@ async function runTile(session, srcCanvas, region) {
   const boxes  = decodeOutput(ov.data, ov.dims, w, h, scale, padL, padT);
 
   // Translate to full-image coordinates
-  return nms(boxes, IOU_THRESHOLD).map(b => ({
+  return dedupeByCentre(nms(boxes, IOU_THRESHOLD)).map(b => ({
     x1: b.x1 + x, y1: b.y1 + y, x2: b.x2 + x, y2: b.y2 + y, conf: b.conf,
   }));
 }
@@ -330,6 +334,37 @@ function nms(boxes, threshold) {
   return kept;
 }
 
+// Centre-distance de-duplication.
+//
+// IoU is the wrong similarity measure for pipe ends. Two boxes on the SAME
+// pipe, offset by half a radius because they came from differently-aligned
+// tiles, score only ~0.35 IoU and ~0.6 intersection-over-smaller, so they slip
+// past both gates and get drawn as two circles on one pipe. High-Res makes it
+// worse because its 40% tile overlap detects each pipe several times.
+//
+// Centre distance is exact here: real pipe ends cannot overlap, so two
+// distinct ends always have centres at least r1+r2 apart, and r1+r2 is always
+// greater than CENTRE_DEDUP_FRAC * max(r1,r2). Anything closer than that
+// therefore cannot be two different pipes.
+function dedupeByCentre(boxes) {
+  const kept = [];
+  for (const b of boxes.slice().sort((a, b2) => b2.conf - a.conf)) {
+    const bx = (b.x1 + b.x2) / 2, by = (b.y1 + b.y2) / 2;
+    const br = Math.min(b.x2 - b.x1, b.y2 - b.y1) / 2;
+    let dup = false;
+    for (const k of kept) {
+      const kx = (k.x1 + k.x2) / 2, ky = (k.y1 + k.y2) / 2;
+      const kr = Math.min(k.x2 - k.x1, k.y2 - k.y1) / 2;
+      if (Math.hypot(bx - kx, by - ky) < CENTRE_DEDUP_FRAC * Math.max(br, kr)) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) kept.push(b);
+  }
+  return kept;
+}
+
 function mergeDetections(boxes) {
   // Remove duplicates across tiles.
   //
@@ -338,21 +373,9 @@ function mergeDetections(boxes) {
   // tight accurate one covering the same pipe — circles ended up drawn
   // larger than the pipe they sit on. Keeping the most confident box first
   // is both standard NMS behaviour and visibly tighter.
-  const filtered = [];
-  for (const b of boxes.sort((a, b2) => b2.conf - a.conf)) {
-    const dup = filtered.some(k => {
-      if (intersectionOverSmaller(b, k) <= SMALLER_BOX_OVERLAP) return false;
-      // Heavy overlap alone is not enough. Only treat the pair as the same
-      // pipe when the two boxes are also comparable in size — otherwise a
-      // small confident detection sitting inside a big pipe would evict the
-      // big pipe entirely, which is how large pipes went missing. Genuinely
-      // different sizes fall through to the IoU pass below, which keeps both.
-      const ratio = Math.sqrt(Math.min(area(b), area(k)) / Math.max(area(b), area(k), 1e-10));
-      return ratio > NESTED_MAX_SIZE_RATIO;
-    });
-    if (!dup) filtered.push(b);
-  }
-  return nms(filtered, IOU_THRESHOLD);
+  // Centre distance handles both cases IoU could not: offset duplicates of
+  // one pipe, and small spurious detections sitting inside a large pipe.
+  return dedupeByCentre(boxes);
 }
 
 function plausibleNested(a, b) {

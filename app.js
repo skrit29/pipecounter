@@ -496,7 +496,14 @@ function refresh() {
   const cutoff = sliderToCutoff(+sensSlider.value);
   const kept = rawPipes.filter(p => p.confidence >= cutoff && !removedIds.has(p.id));
   activePipes = applyRelativeSizes([...kept, ...manualPipes]);
-  sensReadout.textContent = `${activePipes.length} pipes`;
+
+  // Say how many more candidates exist below the cutoff, so it's obvious
+  // when sliding right would actually reveal something.
+  const more = rawPipes.filter(p => p.confidence < cutoff && !removedIds.has(p.id)).length;
+  sensReadout.textContent = more > 0
+    ? `${activePipes.length} shown · ${more} more →`
+    : `${activePipes.length} pipes`;
+
   renderOverlay();
   renderBreakdown();
 }
@@ -533,12 +540,21 @@ function renderOverlay() {
     ctx.lineWidth   = Math.max(1, pr * 0.07) / zs;
     ctx.stroke();
 
-    const fs = Math.max(7, Math.round(pr * 0.8));
+    // Keep the label small enough that the pipe rim stays visible — a number
+    // filling the circle makes it impossible to check the detection. Shrink
+    // further for 2- and 3-digit labels so text WIDTH stays roughly constant.
+    const label  = String(i + 1);
+    const fs     = Math.max(8, Math.round(pr * 0.55 / Math.sqrt(label.length)));
     ctx.font         = `bold ${fs}px -apple-system, sans-serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle    = col;
-    ctx.fillText(String(i + 1), px, py);
+    // Dark halo keeps the number readable over both bright and dark pipes.
+    ctx.lineWidth   = Math.max(1, fs * 0.18) / zs;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.lineJoin    = 'round';
+    ctx.strokeText(label, px, py);
+    ctx.fillStyle   = col;
+    ctx.fillText(label, px, py);
   });
 
   if (editMode === 'add') drawAddPreview(ctx, zs);
@@ -719,12 +735,17 @@ document.getElementById('share-btn').addEventListener('click', async () => {
     ctx.strokeStyle = col;
     ctx.lineWidth   = Math.max(2, pr * 0.07);
     ctx.stroke();
-    const fs = Math.max(10, Math.round(pr * 0.8));
+    const label = String(i + 1);
+    const fs    = Math.max(10, Math.round(pr * 0.55 / Math.sqrt(label.length)));
     ctx.font         = `bold ${fs}px sans-serif`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
+    ctx.lineWidth    = Math.max(1, fs * 0.18);
+    ctx.strokeStyle  = 'rgba(0,0,0,0.8)';
+    ctx.lineJoin     = 'round';
+    ctx.strokeText(label, px, py);
     ctx.fillStyle    = col;
-    ctx.fillText(String(i + 1), px, py);
+    ctx.fillText(label, px, py);
   });
 
   const label = `${activePipes.length} pipe ends`;
