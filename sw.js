@@ -15,7 +15,7 @@
 //   • versioned CDN + wasm files → cache-first (immutable URLs, safe forever).
 
 // Keep in step with APP_VERSION in app.js, which shows this number in the UI.
-const CACHE_NAME = 'pipecounter-v14';
+const CACHE_NAME = 'pipecounter-v15';
 
 const APP_SHELL = [
   './',

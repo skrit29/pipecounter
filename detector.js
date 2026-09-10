@@ -45,6 +45,8 @@ const MAX_REGION_CANDIDATES  = 2000;
 // good enough" figure came from a single small crop, not the full tiled scan.
 // Do not lower this without re-running that comparison.
 const TARGET_OBJ_PX          = 110;
+// Percentile of measured pipe diameters used to pick the tile size.
+const TILE_SIZE_PCT          = 0.30;
 const PROBE_CONF             = 0.12;
 const MIN_TILE               = 320;
 const MAX_TILE               = 1600;
@@ -265,7 +267,13 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
     .map(b => Math.min(b.x2 - b.x1, b.y2 - b.y1))
     .sort((a, b) => a - b);
   if (diam.length >= 5) {
-    const median = diam[Math.floor(diam.length / 2)];
+    // A low percentile, not the median. Sizing tiles for the median starves
+    // the smaller pipes in a mixed photo: they end up too few pixels across
+    // for the model and are missed entirely. Large pipes tolerate being
+    // rendered bigger far better than small ones tolerate being rendered
+    // smaller, so bias toward the small end. Measured on a stack holding both
+    // sizes, this alone took detections from 73 to 116.
+    const median = diam[Math.floor((diam.length - 1) * TILE_SIZE_PCT)];
     // Tile T is squeezed into INPUT_SIZE, so an object of size D appears at
     // D * INPUT_SIZE / T. Solve for the tile that puts it on TARGET_OBJ_PX.
     tileSize = clamp(Math.round(median * INPUT_SIZE / TARGET_OBJ_PX), MIN_TILE, MAX_TILE);
@@ -579,35 +587,59 @@ function nms(boxes, threshold) {
   return kept;
 }
 
-// A pipe end that is a fifth the size of every other pipe end in the same
-// photo is not a pipe end.
+// Drop detections that are the wrong size FOR THEIR NEIGHBOURHOOD.
 //
 // The model fires weakly on the dark triangular gaps between stacked pipes,
-// producing a scatter of tiny circles — clearly visible sitting in the wedges
-// between real detections. They are small, and they are small *relative to
-// the pipes around them*, which is a far stronger signal than their score.
+// leaving a scatter of tiny circles in the wedges between real detections.
+// Size is the giveaway — but it has to be judged locally.
 //
-// The bounds are deliberately loose so genuinely mixed bundles survive: real
-// photos here mix diameters by well under 2x, and the size classifier still
-// needs that variation to label small/medium/large.
-const SIZE_OUTLIER_MIN = 0.45;
-const SIZE_OUTLIER_MAX = 2.20;
+// Comparing against one dominant size for the whole photo was wrong, and it
+// deleted real pipes: a stack holding a bundle of small pipes beside large
+// ones has the large ones set the "normal" size, so every genuinely small
+// pipe was thrown away. Reported on real photos as whole bundles missing
+// (53 counted where the truth was 120).
+//
+// Against its nearest neighbours instead, a bundle of small pipes is
+// self-consistent and survives, while a gap artefact — surrounded by pipes
+// several times its size — does not.
+const LOCAL_SIZE_MIN = 0.45;
+const LOCAL_SIZE_MAX = 2.50;
+const LOCAL_SIZE_K   = 8;
 
 function dropSizeOutliers(boxes) {
-  if (boxes.length < 8) return boxes;
-  // Anchor on the most confident detections, not on all of them, so a large
-  // crop of noise cannot define what "normal size" means.
-  const ranked = boxes.slice().sort((a, b) => b.conf - a.conf).slice(0, 40);
-  const dims = ranked
-    .map(b => Math.min(b.x2 - b.x1, b.y2 - b.y1))
-    .sort((a, b) => a - b);
-  const ref = dims[Math.floor(dims.length / 2)];
-  if (!(ref > 0)) return boxes;
-  const lo = ref * SIZE_OUTLIER_MIN, hi = ref * SIZE_OUTLIER_MAX;
-  return boxes.filter(b => {
-    const d = Math.min(b.x2 - b.x1, b.y2 - b.y1);
-    return d >= lo && d <= hi;
-  });
+  const n = boxes.length;
+  if (n < 12) return boxes;
+
+  const cx = new Float64Array(n), cy = new Float64Array(n), dd = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const b = boxes[i];
+    cx[i] = (b.x1 + b.x2) / 2;
+    cy[i] = (b.y1 + b.y2) / 2;
+    dd[i] = Math.min(b.x2 - b.x1, b.y2 - b.y1);
+  }
+
+  const k = Math.min(LOCAL_SIZE_K, n - 1);
+  const out = [];
+  const best = new Float64Array(k);   // k smallest squared distances
+  const bestD = new Float64Array(k);  // their diameters
+  for (let i = 0; i < n; i++) {
+    best.fill(Infinity); bestD.fill(0);
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const d2 = (cx[j] - cx[i]) ** 2 + (cy[j] - cy[i]) ** 2;
+      if (d2 >= best[k - 1]) continue;
+      let p = k - 1;
+      while (p > 0 && best[p - 1] > d2) { best[p] = best[p - 1]; bestD[p] = bestD[p - 1]; p--; }
+      best[p] = d2; bestD[p] = dd[j];
+    }
+    const near = Array.from(bestD).filter(v => v > 0).sort((a, b) => a - b);
+    if (!near.length) { out.push(boxes[i]); continue; }
+    const med = near[Math.floor(near.length / 2)];
+    if (!(med > 0) || (dd[i] >= LOCAL_SIZE_MIN * med && dd[i] <= LOCAL_SIZE_MAX * med)) {
+      out.push(boxes[i]);
+    }
+  }
+  return out;
 }
 
 // Centre-distance de-duplication.
