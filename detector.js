@@ -24,6 +24,8 @@ const NESTED_MAX_SIZE_RATIO  = 0.58;
 const MIN_BOX_SIDE_MODEL_PX  = 4;
 const MAX_ASPECT_RATIO       = 2.5;
 const HIGH_RES_STRIDE_MULT   = 0.60;
+// 0.75 is also measured: widening to 0.80 to save tiles lost detections at
+// tile seams alongside the TARGET_OBJ_PX change above.
 const STANDARD_STRIDE_MULT   = 0.75;
 const MAX_REGION_CANDIDATES  = 2000;
 
@@ -38,6 +40,10 @@ const MAX_REGION_CANDIDATES  = 2000;
 // pipes are already small the model was being handed ~36px blobs and returned
 // low-confidence guesses that looked random. Tile size is now derived from the
 // measured pipe size so pipes always land near this target.
+// 110 is measured, not guessed. Trying 95 to save tiles (and time) dropped
+// this same image from 102 confident detections to 69 — the earlier "72px is
+// good enough" figure came from a single small crop, not the full tiled scan.
+// Do not lower this without re-running that comparison.
 const TARGET_OBJ_PX          = 110;
 const PROBE_CONF             = 0.12;
 const MIN_TILE               = 320;
@@ -174,6 +180,22 @@ export async function loadModel(url, onProgress) {
   return _session;
 }
 
+// Hand the main thread a turn between tiles so progress paints and Cancel
+// stays responsive.
+//
+// Deliberately NOT setTimeout: browsers clamp timers to ~1s once a tab is
+// backgrounded, so switching away mid-scan added a second of dead time per
+// tile and a long scan slowed to a crawl. A MessageChannel message is a
+// macrotask that is not subject to that clamp.
+const _yieldChannel = typeof MessageChannel !== 'undefined' ? new MessageChannel() : null;
+function yieldToUI() {
+  if (!_yieldChannel) return new Promise(r => setTimeout(r, 0));
+  return new Promise(resolve => {
+    _yieldChannel.port1.onmessage = () => resolve();
+    _yieldChannel.port2.postMessage(0);
+  });
+}
+
 // ── Main detection function ───────────────────────────────────────────────────
 
 /**
@@ -212,7 +234,7 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
     if (cancelToken?.cancelled) throw new Error('cancelled');
     probeBoxes.push(...await runTile(_session, canvas, probeRegions[i], enhance));
     onProgress?.(Math.round(((i + 1) / probeRegions.length) * 12));
-    await new Promise(r => setTimeout(r, 0));
+    await yieldToUI();
   }
 
   let tileSize = STANDARD_TILE_SIZE;
@@ -243,7 +265,7 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
     allBoxes.push(...boxes);
     onProgress?.(12 + Math.round(((i + 1) / regions.length) * 80));
     // Yield to the UI thread so progress paints and the app stays responsive
-    await new Promise(r => setTimeout(r, 0));
+    await yieldToUI();
   }
 
   if (cancelToken?.cancelled) throw new Error('cancelled');
