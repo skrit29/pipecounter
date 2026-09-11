@@ -6,7 +6,6 @@
 const INPUT_SIZE             = 640;
 const STANDARD_TILE_SIZE     = 1280;
 const MAX_STANDARD_SIDE      = 1920;
-const MAX_HIGH_SIDE          = 2560;
 // Detection floor. We deliberately keep everything down to a very low score
 // and let the UI sensitivity slider filter the results afterwards, so the
 // user can tune the count without paying for a re-scan.
@@ -23,7 +22,6 @@ const SMALLER_BOX_OVERLAP    = 0.88;
 const NESTED_MAX_SIZE_RATIO  = 0.58;
 const MIN_BOX_SIDE_MODEL_PX  = 4;
 const MAX_ASPECT_RATIO       = 2.5;
-const HIGH_RES_STRIDE_MULT   = 0.60;
 // 0.75 is also measured: widening to 0.80 to save tiles lost detections at
 // tile seams alongside the TARGET_OBJ_PX change above.
 const STANDARD_STRIDE_MULT   = 0.75;
@@ -50,11 +48,16 @@ const TILE_SIZE_PCT          = 0.30;
 const PROBE_CONF             = 0.12;
 const MIN_TILE               = 320;
 const MAX_TILE               = 1600;
-// Each tile is a full model pass (~2s on a phone), so these are a scan-time
-// budget as much as a quality knob. 48 standard tiles meant multi-minute scans
-// on ordinary photos, which is not usable however good the result is.
-const MAX_TILES_STANDARD     = 20;
-const MAX_TILES_HIGH         = 40;
+// Each tile is a full model pass (~2s on a phone), so this is a scan-time
+// budget as much as a quality knob. 48 meant multi-minute scans; 20 turned out
+// to be too tight — on dense photos the cap forced a larger tile, and the
+// pipes shrank below what the model can see. Measured on the sample set,
+// raising it to 32 changed nothing on 11 of 13 images (the cap never binds)
+// while recovering a great deal on the two dense ones:
+//     293207   874 -> 1083 detections
+//     293206   120 ->  139
+// So the cost is paid only on the photos that actually need it.
+const MAX_TILES_STANDARD     = 32;
 
 const DB_NAME    = 'PipeCounterDB';
 const DB_VERSION = 1;
@@ -226,10 +229,11 @@ function yieldToUI() {
 export async function detectPipes(img, mode, onProgress, cancelToken, opts = {}) {
   if (!_session) throw new Error('Model not loaded');
 
-  const highRes      = mode === 'high';
-  const maxSide      = highRes ? MAX_HIGH_SIDE : MAX_STANDARD_SIDE;
-  const strideMult   = highRes ? HIGH_RES_STRIDE_MULT : STANDARD_STRIDE_MULT;
-  const maxTiles     = highRes ? MAX_TILES_HIGH : MAX_TILES_STANDARD;
+  // `mode` is accepted for compatibility but no longer branches: High-Res was
+  // removed once measurement showed adaptive tiling cancels its pre-scale out.
+  const maxSide      = MAX_STANDARD_SIDE;
+  const strideMult   = STANDARD_STRIDE_MULT;
+  const maxTiles     = MAX_TILES_STANDARD;
   const enhance      = !!opts.enhance;
 
   // ── Pre-scale ──────────────────────────────────────────────────────────────

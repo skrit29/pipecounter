@@ -83,7 +83,7 @@ let tapStart = null;
 // served old code for several releases with no visible symptom, which made
 // "is this the fixed version?" unanswerable without developer tools.
 // Keep in step with CACHE_NAME in sw.js.
-const APP_VERSION = 16;
+const APP_VERSION = 17;
 
 const versionEl = document.getElementById('app-version');
 if (versionEl) {
