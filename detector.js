@@ -5,7 +5,13 @@
 
 const INPUT_SIZE             = 640;
 const STANDARD_TILE_SIZE     = 1280;
-const MAX_STANDARD_SIDE      = 1920;
+// High-Res means SMALLER tiles, so each tile is magnified less and pipes are
+// rendered with more detail. (The previous High-Res raised the pre-scale
+// instead, which adaptive tiling then cancelled out — slower for nothing.)
+const HIGH_TILE_SIZE         = 640;
+// Effectively "no downscale": above any phone camera, present only so a
+// pathological input cannot exhaust memory.
+const NATIVE_MAX_SIDE        = 6000;
 // Detection floor. We deliberately keep everything down to a very low score
 // and let the UI sensitivity slider filter the results afterwards, so the
 // user can tune the count without paying for a re-scan.
@@ -18,46 +24,14 @@ const IOU_THRESHOLD          = 0.45;
 // duplicates cluster below 0.65. Basing it on the SUM rather than the larger
 // radius is what makes it correct for a small pipe beside a large one.
 const CENTRE_DEDUP_FRAC      = 0.65;
-const SMALLER_BOX_OVERLAP    = 0.88;
+// 0.72 matches the original app. The web port had 0.88, a plain transcription
+// error that let overlapping duplicates through.
+const SMALLER_BOX_OVERLAP    = 0.72;
 const NESTED_MAX_SIZE_RATIO  = 0.58;
 const MIN_BOX_SIDE_MODEL_PX  = 4;
 const MAX_ASPECT_RATIO       = 2.5;
-// 0.75 is also measured: widening to 0.80 to save tiles lost detections at
-// tile seams alongside the TARGET_OBJ_PX change above.
 const STANDARD_STRIDE_MULT   = 0.75;
 const MAX_REGION_CANDIDATES  = 2000;
-
-// How large a pipe should appear inside the 640px model input.
-//
-// This is the single biggest driver of accuracy. Measured on one image by
-// feeding the model the same pipes at three scales:
-//     pipe ~36px in input -> 45 found, best confidence 0.39
-//     pipe ~72px in input -> 67 found, best confidence 0.63
-//     pipe ~144px in input -> 28 found, best confidence 0.80
-// A fixed 1280px tile squeezed into 640 halves everything, so on a photo whose
-// pipes are already small the model was being handed ~36px blobs and returned
-// low-confidence guesses that looked random. Tile size is now derived from the
-// measured pipe size so pipes always land near this target.
-// 110 is measured, not guessed. Trying 95 to save tiles (and time) dropped
-// this same image from 102 confident detections to 69 — the earlier "72px is
-// good enough" figure came from a single small crop, not the full tiled scan.
-// Do not lower this without re-running that comparison.
-const TARGET_OBJ_PX          = 110;
-// Percentile of measured pipe diameters used to pick the tile size.
-const TILE_SIZE_PCT          = 0.30;
-const PROBE_CONF             = 0.12;
-const MIN_TILE               = 320;
-const MAX_TILE               = 1600;
-// Each tile is a full model pass (~2s on a phone), so this is a scan-time
-// budget as much as a quality knob. 48 meant multi-minute scans; 20 turned out
-// to be too tight — on dense photos the cap forced a larger tile, and the
-// pipes shrank below what the model can see. Measured on the sample set,
-// raising it to 32 changed nothing on 11 of 13 images (the cap never binds)
-// while recovering a great deal on the two dense ones:
-//     293207   874 -> 1083 detections
-//     293206   120 ->  139
-// So the cost is paid only on the photos that actually need it.
-const MAX_TILES_STANDARD     = 32;
 
 const DB_NAME    = 'PipeCounterDB';
 const DB_VERSION = 1;
@@ -229,67 +203,33 @@ function yieldToUI() {
 export async function detectPipes(img, mode, onProgress, cancelToken, opts = {}) {
   if (!_session) throw new Error('Model not loaded');
 
-  // `mode` is accepted for compatibility but no longer branches: High-Res was
-  // removed once measurement showed adaptive tiling cancels its pre-scale out.
-  const maxSide      = MAX_STANDARD_SIDE;
+  // Fixed tile size at NATIVE resolution — the original app's design.
+  //
+  // This replaces a probe pass that measured pipe size and derived a tile from
+  // it. That scheme was mine, and scored far worse than what it replaced.
+  // Against ground-truth counts on three real photos (120 / 368 / 40), total
+  // absolute error:
+  //
+  //     original design, native resolution        41
+  //     adaptive probe + size filters (shipped)  103
+  //
+  // Pre-scaling was the single most damaging part: running the SAME detector
+  // on photos downscaled to 1920 took its error from 49 to 183, because phone
+  // photos are ~4000px and half the detail was being thrown away before the
+  // model ever ran. So: no downscale, and a tile size that is simply chosen.
+  //
+  // Standard 1280px tiles ≈ 12 passes on a 4000px photo; High-Res 640px tiles
+  // ≈ 40 passes and scores better. That is a real speed/accuracy trade, unlike
+  // the previous High-Res which was slower AND worse.
+  const highRes      = mode === 'high';
+  const tileSize     = highRes ? HIGH_TILE_SIZE : STANDARD_TILE_SIZE;
   const strideMult   = STANDARD_STRIDE_MULT;
-  const maxTiles     = MAX_TILES_STANDARD;
   const enhance      = !!opts.enhance;
 
-  // ── Pre-scale ──────────────────────────────────────────────────────────────
-  // Contrast normalisation happens per tile inside runTile, not here — see
-  // the comment there for why a global stretch cannot help a locally pale
-  // region of an otherwise well-exposed photo.
-  const { canvas, ww, wh } = prescale(img, maxSide);
+  // Native resolution. The cap is only a memory guard for absurd inputs, far
+  // above any phone camera, so in practice nothing is resized.
+  const { canvas, ww, wh } = prescale(img, NATIVE_MAX_SIDE);
 
-  // ── Pass 1: probe for pipe size ────────────────────────────────────────────
-  // A fixed tile size is the wrong thing to commit to before knowing how big
-  // the pipes are. A couple of coarse tiles are enough to measure that: even
-  // at low confidence the predicted box dimensions are accurate, it is only
-  // the score that suffers when objects are small.
-  const probeTile    = Math.min(STANDARD_TILE_SIZE, Math.max(ww, wh));
-  const probeRegions = buildTileRegions(ww, wh, probeTile, 0.95);
-  const probeBoxes   = [];
-  for (let i = 0; i < probeRegions.length; i++) {
-    if (cancelToken?.cancelled) throw new Error('cancelled');
-    probeBoxes.push(...await runTile(_session, canvas, probeRegions[i], enhance));
-    onProgress?.(Math.round(((i + 1) / probeRegions.length) * 12));
-    await yieldToUI();
-  }
-
-  let tileSize = STANDARD_TILE_SIZE;
-  // Measure pipe size from the MOST CONFIDENT detections only.
-  //
-  // Filtering by an absolute score let through the small spurious boxes the
-  // model fires on the dark triangular gaps between stacked pipes. Those drag
-  // the median down, which shrinks the tile, which multiplies the tile count
-  // (slow) and stops whole large pipes fitting inside a tile at all — noise
-  // deciding the scale, and the scale then wrecking the detection. Ranking by
-  // confidence and taking the top slice keeps the estimate on real pipes.
-  const ranked = probeBoxes.slice().sort((a, b) => b.conf - a.conf).slice(0, 40);
-  const diam = ranked
-    .map(b => Math.min(b.x2 - b.x1, b.y2 - b.y1))
-    .sort((a, b) => a - b);
-  if (diam.length >= 5) {
-    // A low percentile, not the median. Sizing tiles for the median starves
-    // the smaller pipes in a mixed photo: they end up too few pixels across
-    // for the model and are missed entirely. Large pipes tolerate being
-    // rendered bigger far better than small ones tolerate being rendered
-    // smaller, so bias toward the small end. Measured on a stack holding both
-    // sizes, this alone took detections from 73 to 116.
-    const median = diam[Math.floor((diam.length - 1) * TILE_SIZE_PCT)];
-    // Tile T is squeezed into INPUT_SIZE, so an object of size D appears at
-    // D * INPUT_SIZE / T. Solve for the tile that puts it on TARGET_OBJ_PX.
-    tileSize = clamp(Math.round(median * INPUT_SIZE / TARGET_OBJ_PX), MIN_TILE, MAX_TILE);
-    // Small tiles on a big photo explode the tile count; back off until the
-    // scan is a sane length, trading some accuracy for finishing at all.
-    while (tileSize < MAX_TILE &&
-           buildTileRegions(ww, wh, tileSize, strideMult).length > maxTiles) {
-      tileSize = Math.round(tileSize * 1.25);
-    }
-  }
-
-  // ── Pass 2: detect at the chosen scale ─────────────────────────────────────
   const regions  = buildTileRegions(ww, wh, tileSize, strideMult);
   const allBoxes = [];
 
@@ -297,16 +237,18 @@ export async function detectPipes(img, mode, onProgress, cancelToken, opts = {})
     if (cancelToken?.cancelled) throw new Error('cancelled');
     const boxes = await runTile(_session, canvas, regions[i], enhance);
     allBoxes.push(...boxes);
-    onProgress?.(12 + Math.round(((i + 1) / regions.length) * 80));
+    onProgress?.(Math.round(((i + 1) / regions.length) * 92));
     // Yield to the UI thread so progress paints and the app stays responsive
     await yieldToUI();
   }
 
   if (cancelToken?.cancelled) throw new Error('cancelled');
 
-  // ── Merge + NMS ────────────────────────────────────────────────────────────
-  const merged   = mergeDetections(allBoxes);
-  const selected = dropSizeOutliers(merged);
+  // ── Merge ──────────────────────────────────────────────────────────────────
+  // No size filtering. Both the global and the neighbour-relative versions I
+  // tried were mine, and both deleted real pipes: measured against ground
+  // truth they were worse than simply not filtering at all.
+  const selected = mergeDetections(allBoxes);
 
   // ── Convert to percentage coordinates ─────────────────────────────────────
   return selected.map(box => {
@@ -589,61 +531,6 @@ function nms(boxes, threshold) {
     if (!kept.some(k => iou(b, k) > threshold)) kept.push(b);
   }
   return kept;
-}
-
-// Drop detections that are the wrong size FOR THEIR NEIGHBOURHOOD.
-//
-// The model fires weakly on the dark triangular gaps between stacked pipes,
-// leaving a scatter of tiny circles in the wedges between real detections.
-// Size is the giveaway — but it has to be judged locally.
-//
-// Comparing against one dominant size for the whole photo was wrong, and it
-// deleted real pipes: a stack holding a bundle of small pipes beside large
-// ones has the large ones set the "normal" size, so every genuinely small
-// pipe was thrown away. Reported on real photos as whole bundles missing
-// (53 counted where the truth was 120).
-//
-// Against its nearest neighbours instead, a bundle of small pipes is
-// self-consistent and survives, while a gap artefact — surrounded by pipes
-// several times its size — does not.
-const LOCAL_SIZE_MIN = 0.45;
-const LOCAL_SIZE_MAX = 2.50;
-const LOCAL_SIZE_K   = 8;
-
-function dropSizeOutliers(boxes) {
-  const n = boxes.length;
-  if (n < 12) return boxes;
-
-  const cx = new Float64Array(n), cy = new Float64Array(n), dd = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const b = boxes[i];
-    cx[i] = (b.x1 + b.x2) / 2;
-    cy[i] = (b.y1 + b.y2) / 2;
-    dd[i] = Math.min(b.x2 - b.x1, b.y2 - b.y1);
-  }
-
-  const k = Math.min(LOCAL_SIZE_K, n - 1);
-  const out = [];
-  const best = new Float64Array(k);   // k smallest squared distances
-  const bestD = new Float64Array(k);  // their diameters
-  for (let i = 0; i < n; i++) {
-    best.fill(Infinity); bestD.fill(0);
-    for (let j = 0; j < n; j++) {
-      if (j === i) continue;
-      const d2 = (cx[j] - cx[i]) ** 2 + (cy[j] - cy[i]) ** 2;
-      if (d2 >= best[k - 1]) continue;
-      let p = k - 1;
-      while (p > 0 && best[p - 1] > d2) { best[p] = best[p - 1]; bestD[p] = bestD[p - 1]; p--; }
-      best[p] = d2; bestD[p] = dd[j];
-    }
-    const near = Array.from(bestD).filter(v => v > 0).sort((a, b) => a - b);
-    if (!near.length) { out.push(boxes[i]); continue; }
-    const med = near[Math.floor(near.length / 2)];
-    if (!(med > 0) || (dd[i] >= LOCAL_SIZE_MIN * med && dd[i] <= LOCAL_SIZE_MAX * med)) {
-      out.push(boxes[i]);
-    }
-  }
-  return out;
 }
 
 // Centre-distance de-duplication.

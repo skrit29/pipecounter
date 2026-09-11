@@ -83,7 +83,7 @@ let tapStart = null;
 // served old code for several releases with no visible symptom, which made
 // "is this the fixed version?" unanswerable without developer tools.
 // Keep in step with CACHE_NAME in sw.js.
-const APP_VERSION = 17;
+const APP_VERSION = 18;
 
 const versionEl = document.getElementById('app-version');
 if (versionEl) {
@@ -538,15 +538,12 @@ async function startScan(img) {
   try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (_) {}
 
   try {
-    // Single detection mode. High-Res used to pre-scale the photo larger, but
-    // adaptive tiling cancels that out entirely — tile size is derived from
-    // the measured pipe size, so pipes land at the same size in the model
-    // input either way. Measured across 13 photos, High-Res with the same
-    // tile overlap gave byte-identical counts; all its remaining effect came
-    // from a tighter overlap, which cost ~50% more time and made two images
-    // materially worse by fragmenting large pipes. It was a slower path to a
-    // worse answer, so the choice is gone.
-    const found = await detectPipes(img, 'standard',
+    // High-Res is a genuine trade again: it means SMALLER tiles (640 vs 1280),
+    // so pipes are rendered with more detail, at roughly 3x the passes.
+    // Measured against ground truth on three photos, total absolute error was
+    // 49 for Standard and 41 for High-Res.
+    const mode = document.getElementById('mode-high').checked ? 'high' : 'standard';
+    const found = await detectPipes(img, mode,
       pct => setProgress(pct, `Scanning… ${pct}%`), cancelToken,
       { enhance: document.getElementById('enhance-chk').checked });
 
